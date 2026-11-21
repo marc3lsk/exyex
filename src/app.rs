@@ -123,6 +123,7 @@ enum Ev {
     SetSearch(SearchOpts),
     SetExclude(String),
     TabDrag(usize, usize),
+    TabRects(usize, Vec<Rect>),
     TabMenu(usize, usize, TabCmd),
     Go(usize, PathBuf),
     GoTyped(usize, String),
@@ -154,6 +155,11 @@ pub struct App {
     ipc: Option<crate::single::Server>,
     /// Tab being dragged to the other pane: (pane, tab index).
     tab_drag: Option<(usize, usize)>,
+    tab_rects: [Vec<Rect>; 2],
+    preview: bool,
+    pv: crate::preview::Previewer,
+    compare: bool,
+    diff: [HashMap<String, Diff>; 2],
     typeahead: (String, Instant),
     drives: Vec<PathBuf>,
     /// OS file-system notifications for the folders shown in the active tabs.
@@ -324,6 +330,11 @@ impl App {
             prev_active: 0,
             ipc,
             tab_drag: None,
+            tab_rects: [vec![], vec![]],
+            preview: false,
+            pv: Default::default(),
+            compare: false,
+            diff: [HashMap::new(), HashMap::new()],
             typeahead: (String::new(), Instant::now()),
             drives: list_drives(),
             watcher,
@@ -383,8 +394,10 @@ impl App {
     fn navigate(&mut self, pi: usize, to: PathBuf) -> bool {
         match self.panes[pi].tab_mut().go(to.clone()) {
             Ok(()) => {
-                self.store.record_visit(&to);
-                self.dirty = true;
+                if self.panes[pi].tab().loading.is_none() {
+                    self.store.record_visit(&to);
+                    self.dirty = true;
+                }
                 true
             }
             Err(e) => {
@@ -566,6 +579,33 @@ impl App {
         }
     }
 
+    /// Recomputes the compare marks (only while compare mode is on).
+    fn refresh_diff(&mut self) {
+        if !self.compare {
+            if !self.diff[0].is_empty() || !self.diff[1].is_empty() {
+                self.diff = [HashMap::new(), HashMap::new()];
+            }
+            return;
+        }
+        self.diff = [diff_map(self.panes[0].tab(), self.panes[1].tab()), diff_map(self.panes[1].tab(), self.panes[0].tab())];
+    }
+
+    /// Selects everything in pane `pi` that is missing / newer / different in the other pane.
+    fn select_diff(&mut self, pi: usize) -> usize {
+        let map = diff_map(self.panes[pi].tab(), self.panes[1 - pi].tab());
+        let t = self.panes[pi].tab_mut();
+        t.selected.clear();
+        for e in &t.entries {
+            if e.is_up || e.deep {
+                continue;
+            }
+            if matches!(map.get(&e.name.to_lowercase()), Some(Diff::OnlyHere | Diff::Newer | Diff::Size)) {
+                t.selected.insert(e.path.clone());
+            }
+        }
+        t.selected.len()
+    }
+
     fn tick(&mut self, ctx: &Context) {
         let mut requests = vec![];
         if let Some(s) = &self.ipc {
@@ -600,6 +640,31 @@ impl App {
         self.poll_jobs(ctx);
         self.sync_watches();
         self.apply_fs_events(ctx);
+        self.refresh_diff();
+        let mut loading = false;
+        let mut arrived = vec![];
+        let mut errors = vec![];
+        for p in &mut self.panes {
+            for t in &mut p.tabs {
+                if t.loading.is_none() {
+                    continue;
+                }
+                let lp = t.poll_load();
+                loading |= lp.pending;
+                arrived.extend(lp.arrived);
+                errors.extend(lp.err);
+            }
+        }
+        for p in arrived {
+            self.store.record_visit(&p);
+            self.dirty = true;
+        }
+        for e in errors {
+            self.say(e);
+        }
+        if loading {
+            ctx.request_repaint_after(Duration::from_millis(80));
+        }
         let mut walking = false;
         for p in &mut self.panes {
             for t in &mut p.tabs {
@@ -630,6 +695,16 @@ impl App {
         }
         ctx.request_repaint_after(Duration::from_millis(1200));
 
+        if let Some(g) = window_geom(ctx) {
+            // keep the last normal (not maximized) size as the one to restore to
+            let prev = self.store.window;
+            let next = if g.maximized { prev.map(|p| WinGeom { maximized: true, ..p }).unwrap_or(g) } else { g };
+            if prev != Some(next) {
+                self.store.window = Some(next);
+                self.dirty = true;
+            }
+        }
+
         let title = format!("exyex — {}", self.tab().path.display());
         if title != self.last_title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
@@ -658,6 +733,16 @@ impl App {
     // ------------------------------------------------------------ commands
 
     fn run(&mut self, ctx: &Context, a: Action) {
+        {
+            let here = crate::archive::in_archive(&self.tab().path);
+            let there = crate::archive::in_archive(&self.panes[1 - self.active].tab().path);
+            let writes_here = matches!(a, Delete | DeletePermanent | Rename | NewFolder | NewFile | ClipCut | ClipPaste | Move);
+            let writes_there = matches!(a, Copy | Move);
+            if (here && writes_here) || (there && writes_there) {
+                self.say("Archives are read-only (you can copy files out of them)");
+                return;
+            }
+        }
         use Action::*;
         let pi = self.active;
         match a {
@@ -716,7 +801,7 @@ impl App {
             Up => {
                 if let Err(e) = self.tab_mut().up() {
                     self.say(e);
-                } else {
+                } else if self.tab().loading.is_none() {
                     let p = self.tab().path.clone();
                     self.store.record_visit(&p);
                     self.dirty = true;
@@ -725,7 +810,7 @@ impl App {
             Back => {
                 if let Err(e) = self.tab_mut().go_back() {
                     self.say(e);
-                } else {
+                } else if self.tab().loading.is_none() {
                     let p = self.tab().path.clone();
                     self.store.record_visit(&p);
                     self.dirty = true;
@@ -734,7 +819,7 @@ impl App {
             Forward => {
                 if let Err(e) = self.tab_mut().go_forward() {
                     self.say(e);
-                } else {
+                } else if self.tab().loading.is_none() {
                     let p = self.tab().path.clone();
                     self.store.record_visit(&p);
                     self.dirty = true;
@@ -744,6 +829,17 @@ impl App {
                 let Some(e) = self.tab().current().cloned() else { return };
                 if e.is_dir {
                     self.navigate(pi, e.path);
+                } else if crate::archive::is_archive_name(&e.path) && crate::archive::split_inner(&e.path).is_none() {
+                    self.navigate(pi, e.path); // browse the archive like a folder
+                } else if let Some((zip, inner)) = crate::archive::split_inner(&e.path) {
+                    match crate::archive::extract_temp(&zip, &inner) {
+                        Ok(tmp) => {
+                            if let Err(err) = open::that_detached(&tmp) {
+                                self.say(format!("⚠ Could not open {}: {err}", e.name));
+                            }
+                        }
+                        Err(err) => self.say(format!("⚠ {err}")),
+                    }
                 } else if let Err(err) = open::that_detached(&e.path) {
                     self.say(format!("⚠ Could not open {}: {err}", e.name));
                 }
@@ -758,6 +854,23 @@ impl App {
                         self.dirty = true;
                     }
                     Err(err) => self.say(err),
+                }
+            }
+            QuickLook => self.preview = !self.preview,
+            CompareToggle => {
+                self.compare = !self.compare;
+                self.refresh_diff();
+                self.say(if self.compare { "Comparing panes: green = only here, orange = newer here, red = older here, purple = different size" } else { "Compare off" });
+            }
+            SelectDiff => {
+                let n = self.select_diff(pi);
+                self.say(if n == 0 { "Nothing differs – this pane has no new or newer items".to_string() } else { format!("{n} item(s) selected") });
+            }
+            SyncToOther => {
+                if self.select_diff(pi) == 0 {
+                    self.say("Panes are in sync – nothing to copy");
+                } else {
+                    self.run(ctx, Copy);
                 }
             }
             Root => {
@@ -950,7 +1063,7 @@ impl App {
 
     fn start_inline(&mut self, pi: usize) {
         let tab = self.panes[pi].tab();
-        let Some(e) = tab.current().filter(|e| !e.is_up && !e.deep) else { return };
+        let Some(e) = tab.current().filter(|e| !e.is_up && !e.deep && !crate::archive::in_archive(&e.path)) else { return };
         self.inline = Some(InlineRename {
             pi,
             dir: tab.path.clone(),
@@ -1502,7 +1615,11 @@ impl App {
         if self.jobs.is_empty() || !self.jobs_open {
             return;
         }
-        let size = vec2(440.0, 300.0);
+        let mut size = vec2(440.0, 300.0);
+        let saved = self.store.jobs_win.filter(|w| w.on_screen());
+        if let Some(w) = saved {
+            size = vec2(w.w, w.h);
+        }
         let mut builder = egui::ViewportBuilder::default()
             .with_title("exyex — Operations")
             .with_inner_size(size)
@@ -1510,9 +1627,12 @@ impl App {
             .with_icon(egui::IconData { rgba: crate::icon_draw::render_icon(64), width: 64, height: 64 })
             .with_active(false); // do not steal focus from the file manager
         // First placement: bottom-right corner of the main window (only used when the window is created).
-        if let Some(r) = ctx.input(|i| i.viewport().outer_rect) {
+        if let Some(w) = saved {
+            builder = builder.with_position(pos2(w.x, w.y));
+        } else if let Some(r) = ctx.input(|i| i.viewport().outer_rect) {
             builder = builder.with_position(pos2(r.right() - size.x - 24.0, r.bottom() - size.y - 70.0));
         }
+        let mut geom: Option<WinGeom> = None;
         let mut close = false;
         let mut dismiss: Vec<u64> = vec![];
         let jobs = &mut self.jobs;
@@ -1521,6 +1641,7 @@ impl App {
                 close = true;
                 return;
             }
+            geom = window_geom(ui.ctx());
             let mut body = |ui: &mut Ui| {
                 let running = jobs.iter().filter(|j| j.state == JobState::Running).count();
                 ui.label(egui::RichText::new(format!("{} operation(s), {} running", jobs.len(), running)).weak());
@@ -1541,6 +1662,10 @@ impl App {
                 egui::CentralPanel::default().show(ui, |ui| body(ui));
             }
         });
+        if let Some(g) = geom.filter(|g| Some(*g) != self.store.jobs_win && !g.maximized) {
+            self.store.jobs_win = Some(g);
+            self.dirty = true;
+        }
         if close {
             self.jobs_open = false;
         }
@@ -1551,7 +1676,8 @@ impl App {
 
     fn ui_pane(&mut self, ui: &mut Ui, pi: usize, evs: &mut Vec<Ev>) {
         let ctx = ui.ctx().clone();
-        let App { panes, icons, store, clipboard, drag, active, drives, inline, .. } = self;
+        let App { panes, icons, store, clipboard, drag, active, drives, inline, diff, .. } = self;
+        let diff = &diff[pi];
         let is_active = *active == pi;
         let dark = ui.visuals().dark_mode;
         let dragging = drag.is_some();
@@ -1583,6 +1709,7 @@ impl App {
                         }
                     }
                     ui.horizontal(|ui| {
+                        let mut rects: Vec<Rect> = Vec::with_capacity(n);
                         for (i, t) in tabs.iter().enumerate() {
                             let sel = i == *ai;
                             let mut label = t.title();
@@ -1593,6 +1720,7 @@ impl App {
                             if sel && reveal {
                                 r.scroll_to_me(Some(Align::Center));
                             }
+                            rects.push(r.rect);
                             let r = r.on_hover_text(t.path.display().to_string());
                             if r.drag_started() {
                                 evs.push(Ev::TabDrag(pi, i));
@@ -1615,6 +1743,7 @@ impl App {
                                 tab_menu_item(ui, evs, pi, i, "Copy path", true, TabCmd::CopyPath);
                             });
                         }
+                        evs.push(Ev::TabRects(pi, rects));
                     });
                 });
             if icon_btn(ui, Ico::Plus, true, "New tab (Ctrl+T)").clicked() {
@@ -1929,6 +2058,16 @@ impl App {
                     if on_accent && !selected {
                         col = Color32::WHITE;
                     }
+                    if !diff.is_empty() && !e.is_up {
+                        if let Some(d) = diff.get(&e.name.to_lowercase()) {
+                            let (c, tip) = d.style(dark);
+                            ui.painter().rect_filled(Rect::from_min_size(rect.min, vec2(4.0, rect.height())), 0.0, c);
+                            if !selected && !on_accent {
+                                col = c;
+                            }
+                            let _ = tip;
+                        }
+                    }
                     let editing = inline.as_ref().is_some_and(|r| r.pi == pi && r.path == e.path);
                     if editing {
                         let edit_rect = Rect::from_min_max(pos2(c_name.left() + 22.0, rect.top() + 1.0), pos2(c_name.right() - 2.0, rect.bottom() - 1.0));
@@ -2009,6 +2148,10 @@ impl App {
 
         // --- footer
         ui.horizontal(|ui| {
+            if let Some(l) = &tab.loading {
+                ui.spinner();
+                ui.weak(format!("Loading {} … {:.0}s", display_name(&l.to), l.since.elapsed().as_secs_f32()));
+            }
             ui.weak(tab.selection_summary());
             if let Some(e) = tab.current() {
                 if !e.is_dir {
@@ -2020,6 +2163,67 @@ impl App {
 }
 
 // ------------------------------------------------------------ pane widgets
+
+/// Current outer position / inner size of the viewport (None while minimized).
+fn window_geom(ctx: &Context) -> Option<WinGeom> {
+    ctx.input(|i| {
+        let vp = i.viewport();
+        if vp.minimized == Some(true) {
+            return None;
+        }
+        let (o, n) = (vp.outer_rect?, vp.inner_rect?);
+        Some(WinGeom { x: o.min.x, y: o.min.y, w: n.width(), h: n.height(), maximized: vp.maximized == Some(true) })
+    })
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Diff {
+    OnlyHere,
+    Newer,
+    Older,
+    Size,
+}
+
+impl Diff {
+    fn style(self, dark: bool) -> (Color32, &'static str) {
+        match (self, dark) {
+            (Diff::OnlyHere, true) => (Color32::from_rgb(110, 205, 120), "only in this pane"),
+            (Diff::OnlyHere, false) => (Color32::from_rgb(30, 135, 50), "only in this pane"),
+            (Diff::Newer, true) => (Color32::from_rgb(255, 170, 60), "newer than in the other pane"),
+            (Diff::Newer, false) => (Color32::from_rgb(200, 110, 0), "newer than in the other pane"),
+            (Diff::Older, true) => (Color32::from_rgb(235, 110, 110), "older than in the other pane"),
+            (Diff::Older, false) => (Color32::from_rgb(190, 50, 50), "older than in the other pane"),
+            (Diff::Size, true) => (Color32::from_rgb(190, 140, 255), "different size"),
+            (Diff::Size, false) => (Color32::from_rgb(120, 60, 200), "different size"),
+        }
+    }
+}
+
+/// How the items of `a` differ from the folder shown in `b` (by name; same items are left out).
+fn diff_map(a: &Tab, b: &Tab) -> HashMap<String, Diff> {
+    let other: HashMap<String, &Entry> = b.entries.iter().filter(|e| !e.is_up && !e.deep).map(|e| (e.name.to_lowercase(), e)).collect();
+    let mut out = HashMap::new();
+    for e in a.entries.iter().filter(|e| !e.is_up && !e.deep) {
+        let key = e.name.to_lowercase();
+        let d = match other.get(&key) {
+            None => Some(Diff::OnlyHere),
+            Some(o) if o.is_dir || e.is_dir => None,
+            Some(o) => {
+                let slack = Duration::from_secs(2);
+                match (e.modified, o.modified) {
+                    (Some(x), Some(y)) if x > y + slack => Some(Diff::Newer),
+                    (Some(x), Some(y)) if y > x + slack => Some(Diff::Older),
+                    _ if e.size != o.size => Some(Diff::Size),
+                    _ => None,
+                }
+            }
+        };
+        if let Some(d) = d {
+            out.insert(key, d);
+        }
+    }
+    out
+}
 
 fn columns(r: Rect) -> (Rect, Rect, Rect) {
     let date = Rect::from_min_max(pos2(r.right() - 134.0, r.top()), pos2(r.right() - 6.0, r.bottom()));
@@ -2587,6 +2791,16 @@ impl eframe::App for App {
 
         let mut evs: Vec<Ev> = vec![];
         egui::Panel::bottom("status").show(ui, |ui| self.ui_status(ui, &mut evs));
+        if self.preview {
+            let entry = self.panes[self.active].tab().current().cloned();
+            let mut close = false;
+            egui::Panel::right("quicklook").resizable(true).default_size(360.0).min_size(220.0).show(ui, |ui| {
+                close = self.pv.ui(ui, entry.as_ref());
+            });
+            if close {
+                self.preview = false;
+            }
+        }
         egui::CentralPanel::default().show(ui, |ui| {
             let full = ui.available_rect_before_wrap();
             let gap = 8.0;
@@ -2758,7 +2972,7 @@ impl App {
                 self.active = pi;
                 let base = self.panes[pi].tab().path.clone();
                 match parse_user_path(&s, &base) {
-                    Some(p) if p.is_dir() => {
+                    Some(p) if p.is_dir() || crate::archive::split(&p).is_some_and(|(z, i)| i.is_empty() || crate::archive::list(&z, &i).is_ok_and(|v| !v.is_empty())) => {
                         self.navigate(pi, p);
                     }
                     Some(p) if p.is_file() => {
@@ -2799,6 +3013,7 @@ impl App {
                 self.dirty = true;
             }
             Ev::TabDrag(pi, i) => self.tab_drag = Some((pi, i)),
+            Ev::TabRects(pi, r) => self.tab_rects[pi] = r,
             Ev::DropHover(p) => self.drop_hover = Some(p),
             Ev::Run(a) => self.run(ctx, a),
         }
@@ -2821,6 +3036,19 @@ impl App {
         let path = src.path.clone();
         let pos = ctx.input(|i| i.pointer.latest_pos());
         let target = pos.and_then(|p| self.panes.iter().position(|pn| pn.rect.contains(p))).filter(|&t| t != from);
+        // Reordering inside the same tab strip: where would the tab be inserted?
+        let slots = self.tab_rects[from].clone();
+        let insert_at = match (pos, slots.first()) {
+            (Some(p), Some(first)) if target.is_none() && p.y >= first.top() - 4.0 && p.y <= first.bottom() + 4.0 && self.panes[from].rect.contains(p) => {
+                Some(slots.iter().filter(|r| r.center().x < p.x).count())
+            }
+            _ => None,
+        };
+        if let (Some(at), Some(first)) = (insert_at, slots.first()) {
+            let x = if at < slots.len() { slots[at].left() - 2.0 } else { slots.last().map_or(first.left(), |r| r.right() + 2.0) };
+            let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("tab-insert-mark")));
+            painter.line_segment([pos2(x, first.top()), pos2(x, first.bottom())], Stroke::new(2.5, ACCENT));
+        }
         if let Some(pos) = pos {
             let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("tab-drag-label")));
             let shift = ctx.input(|i| i.modifiers.shift);
@@ -2835,6 +3063,24 @@ impl App {
         }
         if ctx.input(|i| i.pointer.any_released()) {
             self.tab_drag = None;
+            if let Some(at) = insert_at {
+                let pane = &mut self.panes[from];
+                if at != idx && at != idx + 1 && idx < pane.tabs.len() {
+                    let t = pane.tabs.remove(idx);
+                    let ins = if at > idx { at - 1 } else { at };
+                    pane.tabs.insert(ins, t);
+                    pane.active = if pane.active == idx {
+                        ins
+                    } else if idx < pane.active && ins >= pane.active {
+                        pane.active - 1
+                    } else if idx > pane.active && ins <= pane.active {
+                        pane.active + 1
+                    } else {
+                        pane.active
+                    };
+                    self.dirty = true;
+                }
+            }
             if let Some(t) = target {
                 let shift = ctx.input(|i| i.modifiers.shift);
                 self.open_new_tab(t, path);

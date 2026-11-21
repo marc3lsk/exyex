@@ -35,6 +35,9 @@ pub struct Entry {
 }
 
 pub fn read_dir(p: &Path) -> std::io::Result<Vec<Entry>> {
+    if let Some((zip, inner)) = crate::archive::split(p) {
+        return crate::archive::list(&zip, &inner);
+    }
     let mut out = Vec::new();
     for de in std::fs::read_dir(p)? {
         let Ok(de) = de else { continue };
@@ -241,6 +244,31 @@ pub struct Tab {
     pub want_scroll: Option<f32>,
     pub mtime: Option<SystemTime>,
     pub last_poll: std::time::Instant,
+    /// A navigation that is still reading its folder on a background thread.
+    pub loading: Option<Loading>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NavKind {
+    Go,
+    Back,
+    Forward,
+}
+
+pub struct Loading {
+    pub to: PathBuf,
+    kind: NavKind,
+    focus: Option<String>,
+    rx: std::sync::mpsc::Receiver<Result<Vec<Entry>, String>>,
+    pub since: std::time::Instant,
+}
+
+/// Result of polling a pending navigation.
+#[derive(Default)]
+pub struct LoadPoll {
+    pub pending: bool,
+    pub err: Option<String>,
+    pub arrived: Option<PathBuf>,
 }
 
 impl Tab {
@@ -271,6 +299,7 @@ impl Tab {
             want_scroll: None,
             mtime: None,
             last_poll: std::time::Instant::now(),
+            loading: None,
         };
         t.reload(None);
         t
@@ -491,7 +520,6 @@ impl Tab {
             self.reload(focus);
             return Ok(());
         }
-        let entries = Self::load(&to)?;
         let focus = focus.or_else(|| {
             if self.path.parent() == Some(to.as_path()) {
                 self.path.file_name().map(|n| n.to_string_lossy().into_owned())
@@ -499,11 +527,76 @@ impl Tab {
                 None
             }
         });
+        match self.load_timed(&to, NavKind::Go, focus.clone()) {
+            Some(r) => {
+                self.finish_nav(NavKind::Go, to, r?, focus);
+                Ok(())
+            }
+            None => Ok(()), // finishes in poll_load
+        }
+    }
+
+    /// Reads a folder on a worker thread. Fast folders complete right away
+    /// (`Some`); slow ones (network, huge) keep the old view and finish later.
+    fn load_timed(&mut self, to: &Path, kind: NavKind, focus: Option<String>) -> Option<Result<Vec<Entry>, String>> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let p = to.to_path_buf();
+        std::thread::spawn(move || {
+            let _ = tx.send(Self::load(&p));
+        });
+        match rx.recv_timeout(std::time::Duration::from_millis(120)) {
+            Ok(r) => {
+                self.loading = None;
+                Some(r)
+            }
+            Err(_) => {
+                self.loading = Some(Loading { to: to.to_path_buf(), kind, focus, rx, since: std::time::Instant::now() });
+                None
+            }
+        }
+    }
+
+    fn finish_nav(&mut self, kind: NavKind, to: PathBuf, entries: Vec<Entry>, focus: Option<String>) {
         let old = std::mem::replace(&mut self.path, PathBuf::new());
-        self.back.push(old);
-        self.fwd.clear();
+        match kind {
+            NavKind::Go => {
+                self.back.push(old);
+                self.fwd.clear();
+            }
+            NavKind::Back => self.fwd.push(old),
+            NavKind::Forward => self.back.push(old),
+        }
         self.commit(to, entries, focus);
-        Ok(())
+    }
+
+    /// Completes a pending slow navigation when its folder has been read.
+    pub fn poll_load(&mut self) -> LoadPoll {
+        let Some(l) = self.loading.as_ref() else { return LoadPoll::default() };
+        match l.rx.try_recv() {
+            Err(std::sync::mpsc::TryRecvError::Empty) => LoadPoll { pending: true, ..Default::default() },
+            Err(_) => {
+                self.loading = None;
+                LoadPoll::default()
+            }
+            Ok(r) => {
+                let l = self.loading.take().unwrap();
+                match r {
+                    Ok(entries) => {
+                        let to = l.to.clone();
+                        self.finish_nav(l.kind, l.to, entries, l.focus);
+                        LoadPoll { arrived: Some(to), ..Default::default() }
+                    }
+                    Err(e) => {
+                        match l.kind {
+                            NavKind::Back => self.back.push(l.to),
+                            NavKind::Forward => self.fwd.push(l.to),
+                            NavKind::Go => {}
+                        }
+                        LoadPoll { err: Some(e), ..Default::default() }
+                    }
+                }
+            }
+        }
     }
 
     pub fn up(&mut self) -> Result<(), String> {
@@ -515,33 +608,31 @@ impl Tab {
 
     pub fn go_back(&mut self) -> Result<(), String> {
         let Some(to) = self.back.pop() else { return Ok(()) };
-        match Self::load(&to) {
-            Ok(entries) => {
-                let old = std::mem::replace(&mut self.path, PathBuf::new());
-                self.fwd.push(old);
-                self.commit(to, entries, None);
+        match self.load_timed(&to, NavKind::Back, None) {
+            Some(Ok(entries)) => {
+                self.finish_nav(NavKind::Back, to, entries, None);
                 Ok(())
             }
-            Err(e) => {
+            Some(Err(e)) => {
                 self.back.push(to);
                 Err(e)
             }
+            None => Ok(()),
         }
     }
 
     pub fn go_forward(&mut self) -> Result<(), String> {
         let Some(to) = self.fwd.pop() else { return Ok(()) };
-        match Self::load(&to) {
-            Ok(entries) => {
-                let old = std::mem::replace(&mut self.path, PathBuf::new());
-                self.back.push(old);
-                self.commit(to, entries, None);
+        match self.load_timed(&to, NavKind::Forward, None) {
+            Some(Ok(entries)) => {
+                self.finish_nav(NavKind::Forward, to, entries, None);
                 Ok(())
             }
-            Err(e) => {
+            Some(Err(e)) => {
                 self.fwd.push(to);
                 Err(e)
             }
+            None => Ok(()),
         }
     }
 

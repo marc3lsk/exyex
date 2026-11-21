@@ -17,6 +17,8 @@ to change the code safely. The user writes Slovak; answer in Slovak, keep code/c
 | `app.rs` (largest) | `App` state, all UI (`ui_pane`, dialogs, palette, jobs window), `Ev` event queue, `run(Action)`, themes |
 | `model.rs` | `Entry`, `Tab` (entries/view/cursor/selection/history/sort/filter), `rebuild_view`, path helpers |
 | `search.rs` | in-folder search: `SearchMode` (Smart/Fuzzy/Wildcard/Regex), `compile -> Matcher` (score/ranges), `glob_match` |
+| `archive.rs` | read-only zip/jar as folders: virtual paths (zip file path + inner path) (`split`, `list`, `extract`); hooked into `model::read_dir` and `ops` |
+| `preview.rs` | Quick Look panel (F3): background loader + UI |
 | `deep.rs` | "Subfolders" search: background BFS walker streaming `DeepMsg::Batch` |
 | `actions.rs` | `Action` enum, `bindings()` key table, palette list, names |
 | `ops.rs` | copy/move/trash/delete as background jobs (mpsc + cancel flag, progress, conflict naming) |
@@ -44,6 +46,12 @@ to change the code safely. The user writes Slovak; answer in Slovak, keep code/c
   Directory reads on the UI thread are still synchronous (slow network/huge dirs can freeze – known, unfixed).
 - **FS watcher:** `notify` watches visible folders; events are debounced (200 ms calm / 1 s max); polling fallback
   for unwatched dirs.
+- **Async navigation:** `Tab::go/go_back/go_forward` read the folder on a thread and wait 120 ms; slow folders
+  set `Tab.loading` and finish in `poll_load` (called from `App::tick`). Visits are recorded only on arrival.
+- **Archives:** a path is virtual when an ancestor is an existing `.zip/.jar` file (`archive::split`). `App::run` blocks
+  write actions in archives; `ops` extracts when a copy source is inside one.
+- **Compare:** `App.compare` + `diff` (name → `Diff`) recomputed each tick; rows draw a colored stripe.
+- **Window geometry** is saved in `Store.window` / `jobs_win` (`WinGeom`, validated against the virtual screen).
 - **Operations window** is a separate OS window (`show_viewport_immediate`), not an in-app panel.
 - Confirm dialogs (delete, F5/F6 transfer) focus the OK button; Enter on a focused button is left to egui.
 
@@ -60,6 +68,5 @@ to change the code safely. The user writes Slovak; answer in Slovak, keep code/c
   subfolder search UI, Alt+Enter.
 
 ## Ideas offered but not done
-Async directory loading (fixes busy cursor), "Open in exyex" Explorer context menu, remembering the operations
-window size/position, tab reordering by drag within a pane, WinSCP/SFTP (via Pageant; phased plan discussed), first
+See `ROADMAP.md`. Notably: "Open in exyex" Explorer context menu, WinSCP/SFTP (via Pageant; phased plan discussed), first
 git commit.

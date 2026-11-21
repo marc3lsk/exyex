@@ -51,6 +51,18 @@ Reparse points / symlinks are not followed, hidden items follow the "show hidden
 A manual **exclude** box appears next to the chip: names or wildcards separated by commas, e.g.
 `node_modules, .git, *.tmp`. Nothing is excluded unless you type it; the list is remembered.
 
+## Quick Look, compare, archives
+- **F3 – Quick Look:** side panel that follows the cursor: text (first 64 KB), images (png/jpg/gif/bmp/webp/ico),
+  folder summaries, zip contents, hex head for binary files. Close with the ✕ or F3 again.
+- **Ctrl+M – compare panes:** marks items by name against the other pane: green = only here, orange = newer here,
+  red = older here, purple = different size. **Ctrl+Shift+M** selects what is missing/newer/different here;
+  **Alt+Shift+S** does that and opens the copy dialog (one-way sync to the other pane). Folders are compared by existence.
+- **Zip / jar as folders:** Enter on a `.zip` browses it (path bar, search and subfolder search work inside).
+  Archives are read-only; copy (F5, drag, clipboard) extracts, Enter on a file inside opens a temp copy.
+- **Tabs:** drag a tab left/right inside its strip to reorder (the blue mark shows where it lands).
+- Slow or network folders load in the background (spinner in the footer); window position/size is remembered.
+- Terminals: Alt+Shift+P PowerShell, Alt+Shift+C cmd, Alt+Shift+E Explorer here, Ctrl+Shift+O Windows Terminal.
+
 ## Install / command line
 Run `exyex_<version>_x64_setup.exe` (or `exyex.exe --install`). It installs per user (no admin):
 copies to `%LOCALAPPDATA%\Programs\exyex`, adds that folder to your user PATH, adds a Start menu shortcut and

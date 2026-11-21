@@ -52,8 +52,46 @@ impl ThemeChoice {
     }
 }
 
+/// Remembered window placement (outer position, inner size).
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
+pub struct WinGeom {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    #[serde(default)]
+    pub maximized: bool,
+}
+
+impl WinGeom {
+    /// The window's title bar must still be reachable (monitors can disappear).
+    #[cfg(windows)]
+    pub fn on_screen(&self) -> bool {
+        use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN};
+        // SAFETY: plain metric queries
+        let (vx, vy, vw, vh) = unsafe {
+            (
+                GetSystemMetrics(SM_XVIRTUALSCREEN) as f32,
+                GetSystemMetrics(SM_YVIRTUALSCREEN) as f32,
+                GetSystemMetrics(SM_CXVIRTUALSCREEN) as f32,
+                GetSystemMetrics(SM_CYVIRTUALSCREEN) as f32,
+            )
+        };
+        let (cx, cy) = (self.x + self.w / 2.0, self.y + 16.0);
+        self.w >= 200.0 && self.h >= 120.0 && cx >= vx && cx <= vx + vw && cy >= vy && cy <= vy + vh
+    }
+    #[cfg(not(windows))]
+    pub fn on_screen(&self) -> bool {
+        true
+    }
+}
+
 #[derive(Serialize, Deserialize, Default)]
 pub struct Store {
+    #[serde(default)]
+    pub window: Option<WinGeom>,
+    #[serde(default)]
+    pub jobs_win: Option<WinGeom>,
     #[serde(default)]
     pub theme: ThemeChoice,
     #[serde(default)]

@@ -2,6 +2,7 @@
 
 mod actions;
 mod app;
+mod archive;
 mod deep;
 mod icon_draw;
 mod icons;
@@ -9,6 +10,7 @@ mod icons;
 mod install;
 mod model;
 mod ops;
+mod preview;
 mod search;
 mod single;
 mod store;
@@ -41,10 +43,13 @@ fn main() -> eframe::Result {
         single::Init::Standalone => None,
     };
 
+    let saved = store::Store::load().window.filter(|w| w.on_screen());
+    let mut viewport = eframe::egui::ViewportBuilder::default().with_title("exyex").with_inner_size([1360.0, 820.0]);
+    if let Some(w) = saved {
+        viewport = viewport.with_inner_size([w.w, w.h]).with_position([w.x, w.y]).with_maximized(w.maximized);
+    }
     let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("exyex")
-            .with_inner_size([1360.0, 820.0])
+        viewport: viewport
             .with_min_inner_size([760.0, 420.0])
             .with_drag_and_drop(true)
             .with_icon(eframe::egui::IconData { rgba: icon_draw::render_icon(64), width: 64, height: 64 }),

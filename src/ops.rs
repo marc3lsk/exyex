@@ -188,12 +188,29 @@ fn run(
         }
         OpKind::Copy | OpKind::Move => {
             let dest = dest.ok_or("no destination")?;
-            let mut pr = Progress { tx, ctx, done: 0, total: srcs.iter().map(|s| tree_size(s)).sum(), last: Instant::now() };
+            let src_size = |s: &PathBuf| match crate::archive::split_inner(s) {
+                Some((z, i)) => crate::archive::size(&z, &i),
+                None => tree_size(s),
+            };
+            let mut pr = Progress { tx, ctx, done: 0, total: srcs.iter().map(src_size).sum(), last: Instant::now() };
             for s in srcs {
                 if cancel.load(Ordering::Relaxed) {
                     return Err("Cancelled".into());
                 }
                 let Some(name) = s.file_name() else { continue };
+                if let Some((zip, inner)) = crate::archive::split_inner(s) {
+                    // copying out of an archive = extracting
+                    if kind == OpKind::Move {
+                        errors.push(format!("{}: archives are read-only", s.display()));
+                        continue;
+                    }
+                    let target = unique_dest(dest, name);
+                    let mut sink = |n: u64| pr.advance(n, s);
+                    if let Err(e) = crate::archive::extract(&zip, &inner, &target, cancel, &mut sink) {
+                        errors.push(format!("{}: {}", s.display(), e));
+                    }
+                    continue;
+                }
                 if kind == OpKind::Move && s.parent() == Some(dest) {
                     continue; // already there
                 }
