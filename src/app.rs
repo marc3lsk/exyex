@@ -635,8 +635,15 @@ impl App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.last_title = title;
         }
-        if self.dirty && self.last_save.elapsed() > Duration::from_secs(3) {
-            self.save_state();
+        if self.dirty {
+            // Debounced save. egui only repaints on input, so schedule a wake-up
+            // – otherwise the last change would wait for the next mouse move.
+            let wait = Duration::from_secs(1);
+            if self.last_save.elapsed() >= wait {
+                self.save_state();
+            } else {
+                ctx.request_repaint_after(wait - self.last_save.elapsed());
+            }
         }
         // Files dropped from Explorer: copy into the pane under the pointer.
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| Some(f.path().to_path_buf())).collect());
@@ -718,11 +725,19 @@ impl App {
             Back => {
                 if let Err(e) = self.tab_mut().go_back() {
                     self.say(e);
+                } else {
+                    let p = self.tab().path.clone();
+                    self.store.record_visit(&p);
+                    self.dirty = true;
                 }
             }
             Forward => {
                 if let Err(e) = self.tab_mut().go_forward() {
                     self.say(e);
+                } else {
+                    let p = self.tab().path.clone();
+                    self.store.record_visit(&p);
+                    self.dirty = true;
                 }
             }
             Open => {
@@ -2215,7 +2230,7 @@ fn breadcrumbs(ui: &mut Ui, path: &Path, pi: usize, evs: &mut Vec<Ev>) {
 }
 
 fn suggestions(text: &str, orig: &str, base: &Path, store: &Store) -> Vec<Sugg> {
-    const MAX: usize = 10;
+    const MAX: usize = 14;
     let mut seen: HashSet<String> = HashSet::new();
     let mut push = |out: &mut Vec<Sugg>, p: PathBuf, tag: &'static str| {
         if out.len() < MAX && seen.insert(p.to_string_lossy().to_lowercase()) {
@@ -2274,7 +2289,7 @@ fn suggestions(text: &str, orig: &str, base: &Path, store: &Store) -> Vec<Sugg> 
             ranked.push((s + 500, PathBuf::from(f), "★ favorite"));
         }
     }
-    for (p, score) in store.frecent().into_iter().take(250) {
+    for (p, score) in store.frecent().into_iter() {
         let full = p.to_string_lossy();
         let best = actions::fuzzy(q, &full).into_iter().chain(actions::fuzzy(q, &display_name(&p)).map(|s| s + 20)).max();
         if let Some(s) = best {
@@ -2282,11 +2297,11 @@ fn suggestions(text: &str, orig: &str, base: &Path, store: &Store) -> Vec<Sugg> 
         }
     }
     ranked.sort_by(|a, b| b.0.cmp(&a.0));
-    let hist: Vec<(PathBuf, &'static str)> = ranked.into_iter().filter(|r| r.1.is_dir()).take(6).map(|r| (r.1, r.2)).collect();
+    let hist: Vec<(PathBuf, &'static str)> = ranked.into_iter().filter(|r| r.1.is_dir()).take(8).map(|r| (r.1, r.2)).collect();
 
     let mut out = vec![];
     if pathlike {
-        for p in subfolders(dir_part, leaf) {
+        for p in subfolders(dir_part, leaf).into_iter().take(if hist.is_empty() { 8 } else { 6 }) {
             push(&mut out, p, "");
         }
         for (p, t) in hist {
@@ -2311,6 +2326,7 @@ fn path_edit_ui(ui: &mut Ui, pe: &mut PathEdit, base: &Path, pi: usize, evs: &mu
     let ctx = ui.ctx().clone();
     // Entry to forget: (path, tag). Set by the × button or the Delete key.
     let mut remove: Option<(PathBuf, &'static str)> = None;
+    let mut add_fav: Option<PathBuf> = None;
     // keys consumed before the widget sees them
     let (esc, enter, down, up, tab) = ctx.input_mut(|i| {
         (
@@ -2399,11 +2415,25 @@ fn path_edit_ui(ui: &mut Ui, pe: &mut PathEdit, base: &Path, pi: usize, evs: &mu
                         let tc = ui.visuals().text_color();
                         let weak = ui.visuals().weak_text_color();
                         let removable = !sg.tag.is_empty();
-                        let tag_right = if removable { 28.0 } else { 8.0 };
-                        let clip = Rect::from_min_max(rect.min, pos2(rect.right() - 84.0 - if removable { 20.0 } else { 0.0 }, rect.bottom()));
+                        let can_star = sg.tag == "recent";
+                        let tag_right = if removable { 28.0 + if can_star { 20.0 } else { 0.0 } } else { 8.0 };
+                        let clip = Rect::from_min_max(rect.min, pos2(rect.right() - 84.0 - if removable { 20.0 } else { 0.0 } - if can_star { 20.0 } else { 0.0 }, rect.bottom()));
                         ui.painter().with_clip_rect(clip).text(rect.left_center() + vec2(8.0, 0.0), Align2::LEFT_CENTER, label, FontId::proportional(13.5), tc);
                         ui.painter().text(rect.right_center() - vec2(tag_right, 0.0), Align2::RIGHT_CENTER, right, FontId::proportional(11.5), weak);
                         let mut x_clicked = false;
+                        if can_star {
+                            let sr = Rect::from_center_size(pos2(rect.right() - 34.0, rect.center().y), vec2(18.0, 18.0));
+                            let sresp = ui.interact(sr, resp.id.with("fav"), Sense::click());
+                            if sresp.hovered() {
+                                ui.painter().rect_filled(sr, 5.0, tint(dark, 34));
+                            }
+                            let col = if sresp.hovered() { Color32::from_rgb(255, 190, 0) } else if resp.hovered() || pe.sel == Some(i) { tc } else { weak };
+                            ui.painter().text(sr.center(), Align2::CENTER_CENTER, "☆", FontId::proportional(14.0), col);
+                            if sresp.on_hover_text("Add to favorites").clicked() {
+                                add_fav = Some(sg.path.clone());
+                                x_clicked = true;
+                            }
+                        }
                         if removable {
                             let xr = Rect::from_center_size(pos2(rect.right() - 14.0, rect.center().y), vec2(18.0, 18.0));
                             let xresp = ui.interact(xr, resp.id.with("forget"), Sense::click());
@@ -2430,6 +2460,14 @@ fn path_edit_ui(ui: &mut Ui, pe: &mut PathEdit, base: &Path, pi: usize, evs: &mu
         pe.popup_rect = area.response.rect;
     } else {
         pe.popup_rect = Rect::NOTHING;
+    }
+    if let Some(p) = add_fav {
+        if !store.is_favorite(&p) {
+            store.toggle_favorite(&p);
+        }
+        store.save();
+        pe.sugg_for = "\u{1}".into();
+        out.response.request_focus();
     }
     if let Some((p, tag)) = remove {
         if tag == "recent" {

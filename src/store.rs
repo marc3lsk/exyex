@@ -80,8 +80,26 @@ impl Store {
     pub fn load() -> Store {
         file()
             .and_then(|f| std::fs::read_to_string(f).ok())
-            .and_then(|s| serde_json::from_str(&s).ok())
+            .and_then(|s| serde_json::from_str::<Store>(&s).ok())
+            .map(|mut st| {
+                st.merge_case_duplicates();
+                st
+            })
             .unwrap_or_default()
+    }
+
+    /// Folds visit entries that differ only by letter case (c:/x vs C:/x) into one.
+    fn merge_case_duplicates(&mut self) {
+        let mut merged: HashMap<String, (String, Visit)> = HashMap::new();
+        for (k, v) in self.visits.drain() {
+            let e = merged.entry(k.to_lowercase()).or_insert_with(|| (k.clone(), Visit::default()));
+            if v.last >= e.1.last {
+                e.0 = k; // keep the spelling used most recently
+            }
+            e.1.count += v.count;
+            e.1.last = e.1.last.max(v.last);
+        }
+        self.visits = merged.into_values().collect();
     }
 
     pub fn save(&self) {
@@ -98,23 +116,21 @@ impl Store {
     }
 
     pub fn record_visit(&mut self, p: &std::path::Path) {
-        let v = self.visits.entry(p.to_string_lossy().into_owned()).or_default();
+        let key = p.to_string_lossy().trim_end_matches('\\').to_string();
+        let key = if key.ends_with(':') { format!("{key}\\") } else { key };
+        // Windows paths are case-insensitive: reuse an existing entry that differs only by case
+        let existing = self.visits.keys().find(|k| k.eq_ignore_ascii_case(&key)).cloned();
+        let v = self.visits.entry(existing.unwrap_or(key)).or_default();
         v.count += 1;
         v.last = now();
-        if self.visits.len() > 800 {
-            let mut all: Vec<(String, f64)> = self.visits.iter().map(|(k, v)| (k.clone(), score(v))).collect();
-            all.sort_by(|a, b| a.1.total_cmp(&b.1));
-            for (k, _) in all.into_iter().take(200) {
-                self.visits.remove(&k);
-            }
-        }
     }
 
-    /// Folders ranked by frecency (frequency weighted by recency).
+    /// Folders ranked by how often they were opened (ties: most recent first).
     pub fn frecent(&self) -> Vec<(PathBuf, f64)> {
-        let mut v: Vec<(PathBuf, f64)> = self.visits.iter().map(|(k, v)| (PathBuf::from(k), score(v))).collect();
-        v.sort_by(|a, b| b.1.total_cmp(&a.1));
-        v
+        let mut v: Vec<(&String, &Visit)> = self.visits.iter().collect();
+        // most opened first; ties: most recently opened
+        v.sort_by(|a, b| b.1.count.cmp(&a.1.count).then(b.1.last.cmp(&a.1.last)));
+        v.into_iter().map(|(k, v)| (PathBuf::from(k), v.count as f64)).collect()
     }
 
     /// Removes a folder from the favorites list (returns whether it was there).
@@ -150,9 +166,4 @@ impl Store {
             true
         }
     }
-}
-
-fn score(v: &Visit) -> f64 {
-    let age_days = now().saturating_sub(v.last) as f64 / 86400.0;
-    (v.count as f64).sqrt() * 10.0 / (1.0 + age_days)
 }
