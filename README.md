@@ -27,4 +27,17 @@ Native (Rust + egui) dual-pane file manager for Windows — a keyboard-first alt
 | Ctrl+F3..F6 | sort name / ext / date / size |
 | Ctrl+H | hidden files; Ctrl+B favorite; Ctrl+U swap panes; Ctrl+Shift+C copy path |
 
+## Install / command line
+Run `exyex_<version>_x64_setup.exe` (or `exyex.exe --install`). It installs per user (no admin):
+copies to `%LOCALAPPDATA%\Programs\exyex`, adds that folder to your user PATH, adds a Start menu shortcut and
+an "Apps & features" entry. `exyex --uninstall` (or Apps & features) removes it again.
+
+Then, in any **new** terminal:
+
+    exyex .            # opens the current folder as a new tab in the running exyex
+    exyex C:\some\dir  # same; starts exyex if it is not running yet
+
+exyex is single-instance: a second `exyex <path>` hands the path to the running window and exits.
+If that folder is already open in a tab, it just switches to it.
+
 State lives in `%APPDATA%\exyex\state.json`.

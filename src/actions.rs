@@ -12,6 +12,9 @@ pub enum Action {
     MirrorToOther,
     NewTab,
     CloseTab,
+    CloseOtherTabs,
+    CloseTabsLeft,
+    CloseTabsRight,
     ReopenTab,
     NextTab,
     PrevTab,
@@ -58,7 +61,7 @@ use Action::*;
 /// Actions listed in the command palette (in display order).
 pub const PALETTE_ACTIONS: &[Action] = &[
     FolderJump, Copy, Move, Rename, Delete, DeletePermanent, NewFolder, NewFile, ClipCopy, ClipCut, ClipPaste,
-    CopyPath, NewTab, CloseTab, ReopenTab, NextTab, PrevTab, SwitchPane, SwapPanes, MirrorToOther, Up, Back,
+    CopyPath, NewTab, CloseTab, CloseOtherTabs, CloseTabsLeft, CloseTabsRight, ReopenTab, NextTab, PrevTab, SwitchPane, SwapPanes, MirrorToOther, Up, Back,
     Forward, Open, OpenInNewTab, Refresh, EditPath, Filter, SelectAll, SelectNone, InvertSelection, ToggleSelect,
     ToggleHidden, SortName, SortExt, SortSize, SortDate, ToggleFavorite, Reveal, Terminal, ThemeCycle, ThemeSystem, ThemeLight, ThemeDark, Quit,
 ];
@@ -72,6 +75,9 @@ pub fn name(a: Action) -> &'static str {
         MirrorToOther => "Open this folder in the other pane",
         NewTab => "New tab (duplicate current)",
         CloseTab => "Close tab",
+        CloseOtherTabs => "Close other tabs",
+        CloseTabsLeft => "Close tabs to the left",
+        CloseTabsRight => "Close tabs to the right",
         ReopenTab => "Reopen closed tab",
         NextTab => "Next tab",
         PrevTab => "Previous tab",

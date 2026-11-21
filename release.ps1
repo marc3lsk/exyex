@@ -2,7 +2,7 @@
 .SYNOPSIS
   Builds the optimized exyex.exe and collects it in .\release\ (portable .exe and .zip).
 .PARAMETER Bundle
-  exe, zip or all (default).
+  exe (portable), setup (self-installing exe: adds exyex to PATH), zip or all (default).
 .PARAMETER SkipChecks
   Skip `cargo check` and `cargo test` before building.
 .EXAMPLE
@@ -11,7 +11,7 @@
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('all', 'exe', 'zip')][string]$Bundle = 'all',
+    [ValidateSet('all', 'exe', 'setup', 'zip')][string]$Bundle = 'all',
     [switch]$SkipChecks
 )
 
@@ -61,6 +61,10 @@ New-Item -ItemType Directory -Force $out | Out-Null
 $produced = @()
 if ($Bundle -in 'all', 'exe') {
     $produced += Copy-Item $built (Join-Path $out "exyex_${ver}_x64.exe") -Force -PassThru
+}
+if ($Bundle -in 'all', 'setup') {
+    # Same binary under a *_setup name: exyex detects that and runs the install wizard.
+    $produced += Copy-Item $built (Join-Path $out "exyex_${ver}_x64_setup.exe") -Force -PassThru
 }
 if ($Bundle -in 'all', 'zip') {
     $zip = Join-Path $out "exyex_${ver}_x64.zip"

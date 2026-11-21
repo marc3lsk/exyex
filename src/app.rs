@@ -34,6 +34,8 @@ struct PathEdit {
 }
 
 struct Pane {
+    /// (active tab, tab count) last frame: when it changes the strip scrolls to the active tab.
+    seen_tabs: (usize, usize),
     tabs: Vec<Tab>,
     active: usize,
     path_edit: Option<PathEdit>,
@@ -94,6 +96,18 @@ struct Drag {
     paths: Vec<PathBuf>,
 }
 
+#[derive(Clone, Copy)]
+enum TabCmd {
+    Close,
+    Others,
+    Left,
+    Right,
+    Duplicate,
+    OpenOther,
+    MoveOther,
+    CopyPath,
+}
+
 enum Ev {
     Click { pi: usize, vi: usize, ctrl: bool, shift: bool },
     Open { pi: usize, vi: usize },
@@ -104,6 +118,7 @@ enum Ev {
     CloseTab(usize, usize),
     NewTab(usize),
     TabDrag(usize, usize),
+    TabMenu(usize, usize, TabCmd),
     Go(usize, PathBuf),
     GoTyped(usize, String),
     DragStart { pi: usize, paths: Vec<PathBuf> },
@@ -129,6 +144,8 @@ pub struct App {
     /// Pending slow-second-click rename: (pane, dir, path, time of click).
     rename_timer: Option<(usize, PathBuf, PathBuf, Instant)>,
     prev_active: usize,
+    /// Requests from later `exyex <path>` launches (open as a tab here).
+    ipc: Option<crate::single::Server>,
     /// Tab being dragged to the other pane: (pane, tab index).
     tab_drag: Option<(usize, usize)>,
     typeahead: (String, Instant),
@@ -219,7 +236,10 @@ fn selected_text(dark: bool) -> Color32 {
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, ipc: Option<crate::single::Server>) -> Self {
+        if let Some(s) = &ipc {
+            s.set_ctx(cc.egui_ctx.clone());
+        }
         setup_style(&cc.egui_ctx);
         let store = Store::load();
         apply_theme(&cc.egui_ctx, store.theme);
@@ -246,7 +266,7 @@ impl App {
             if tabs.is_empty() {
                 tabs.push(Tab::new(default.to_path_buf(), show_hidden));
             }
-            Pane { tabs, active, path_edit: None, focus_filter: false, rect: Rect::NOTHING }
+            Pane { tabs, active, path_edit: None, focus_filter: false, rect: Rect::NOTHING, seen_tabs: (usize::MAX, 0) }
         };
 
         let mut app = App {
@@ -265,6 +285,7 @@ impl App {
             inline: None,
             rename_timer: None,
             prev_active: 0,
+            ipc,
             tab_drag: None,
             typeahead: (String::new(), Instant::now()),
             drives: list_drives(),
@@ -401,7 +422,47 @@ impl App {
         }
     }
 
+    /// `exyex <path>` from another terminal: show the folder as a tab in this window.
+    fn handle_external_open(&mut self, ctx: &Context, req: Option<PathBuf>) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        let Some(p) = req else { return };
+        let (dir, focus) = if p.is_dir() {
+            (p, None)
+        } else if p.is_file() {
+            match (p.parent(), p.file_name()) {
+                (Some(d), Some(n)) => (d.to_path_buf(), Some(n.to_string_lossy().into_owned())),
+                _ => return,
+            }
+        } else {
+            self.say(format!("⚠ Path not found: {}", p.display()));
+            return;
+        };
+        // Already open somewhere? Just switch to it.
+        let existing = self.panes.iter().enumerate().find_map(|(pi, pane)| pane.tabs.iter().position(|t| t.path == dir).map(|ti| (pi, ti)));
+        if let Some((pi, ti)) = existing {
+            self.panes[pi].active = ti;
+            self.active = pi;
+        } else {
+            let pi = self.active;
+            self.open_new_tab(pi, dir);
+        }
+        if let Some(name) = focus {
+            self.tab_mut().reload(Some(name));
+        }
+        self.dirty = true;
+    }
+
     fn tick(&mut self, ctx: &Context) {
+        let mut requests = vec![];
+        if let Some(s) = &self.ipc {
+            while let Ok(r) = s.rx.try_recv() {
+                requests.push(r);
+            }
+        }
+        for r in requests {
+            self.handle_external_open(ctx, r);
+        }
         if let Some((pi, dir, path, t0)) = self.rename_timer.clone() {
             if t0.elapsed() >= Duration::from_millis(450) {
                 self.rename_timer = None;
@@ -488,6 +549,18 @@ impl App {
                 } else {
                     self.say("Can't close the last tab of a pane");
                 }
+            }
+            CloseOtherTabs => {
+                let a = self.panes[pi].active;
+                self.close_tabs_where(pi, a, |_| true);
+            }
+            CloseTabsLeft => {
+                let a = self.panes[pi].active;
+                self.close_tabs_where(pi, a, |i| i < a);
+            }
+            CloseTabsRight => {
+                let a = self.panes[pi].active;
+                self.close_tabs_where(pi, a, |i| i > a);
             }
             ReopenTab => {
                 if let Some((p, path)) = self.closed_tabs.pop() {
@@ -652,6 +725,41 @@ impl App {
         }
     }
 
+    /// Closes every tab of pane `pi` for which `close(index)` is true, except `anchor`
+    /// (which is kept and becomes the active tab if the active one was closed).
+    fn close_tabs_where(&mut self, pi: usize, anchor: usize, close: impl Fn(usize) -> bool) {
+        let pane = &mut self.panes[pi];
+        if anchor >= pane.tabs.len() {
+            return;
+        }
+        let old_active = pane.active;
+        let (mut kept, mut closed) = (vec![], vec![]);
+        let (mut new_active, mut anchor_new) = (None, 0);
+        for (i, t) in std::mem::take(&mut pane.tabs).into_iter().enumerate() {
+            if i != anchor && close(i) {
+                closed.push(t.path);
+                continue;
+            }
+            if i == old_active {
+                new_active = Some(kept.len());
+            }
+            if i == anchor {
+                anchor_new = kept.len();
+            }
+            kept.push(t);
+        }
+        pane.tabs = kept;
+        pane.active = new_active.unwrap_or(anchor_new);
+        let n = closed.len();
+        for path in closed.into_iter().rev() {
+            self.closed_tabs.push((pi, path));
+        }
+        self.dirty = true;
+        if n > 0 {
+            self.say(format!("Closed {n} tab(s) — Ctrl+Shift+T reopens the last one"));
+        }
+    }
+
     fn start_inline(&mut self, pi: usize) {
         let tab = self.panes[pi].tab();
         let Some(e) = tab.current().filter(|e| !e.is_up) else { return };
@@ -759,6 +867,20 @@ impl App {
         let hit = self.bindings.iter().find_map(|b| ctx.input_mut(|i| i.consume_key(b.mods, b.key)).then_some(b.action));
         if let Some(a) = hit {
             return self.run(ctx, a);
+        }
+
+        // Ctrl+1..8 jump to that tab, Ctrl+9 to the last one (like a browser).
+        let digits = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9];
+        for (n, k) in digits.iter().enumerate() {
+            if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, *k)) {
+                let pane = &mut self.panes[pi];
+                let idx = if n == 8 { pane.tabs.len() - 1 } else { n };
+                if idx < pane.tabs.len() {
+                    pane.active = idx;
+                    self.dirty = true;
+                }
+                return;
+            }
         }
 
         // Cursor movement
@@ -1144,33 +1266,82 @@ impl App {
         let dragging = drag.is_some();
         let drag_paths: Vec<PathBuf> = drag.as_ref().map(|d| d.paths.clone()).unwrap_or_default();
         let cut: Option<&Vec<PathBuf>> = clipboard.as_ref().filter(|c| c.1).map(|c| &c.0);
-        let Pane { tabs, active: ai, path_edit, focus_filter, .. } = &mut panes[pi];
+        let Pane { tabs, active: ai, path_edit, focus_filter, seen_tabs, .. } = &mut panes[pi];
 
         ui.spacing_mut().item_spacing = vec2(4.0, 3.0);
 
-        // --- tab strip
+        // --- tab strip: scrolls sideways when there are many tabs; the list button
+        // on the right jumps to any tab.
+        let reveal = *seen_tabs != (*ai, tabs.len());
+        *seen_tabs = (*ai, tabs.len());
         ui.horizontal(|ui| {
             let n = tabs.len();
-            for (i, t) in tabs.iter().enumerate() {
-                let sel = i == *ai;
-                let mut label = t.title();
-                if label.chars().count() > 20 {
-                    label = format!("{}…", label.chars().take(19).collect::<String>());
-                }
-                let (r, close) = tab_pill(ui, &label, sel, n > 1);
-                let r = r.on_hover_text(t.path.display().to_string());
-                if r.drag_started() {
-                    evs.push(Ev::TabDrag(pi, i));
-                }
-                if close || (r.middle_clicked() && n > 1) {
-                    evs.push(Ev::CloseTab(pi, i));
-                } else if r.clicked() {
-                    evs.push(Ev::Tab(pi, i));
-                }
-            }
+            let strip_w = (ui.available_width() - 66.0).max(60.0);
+            let strip_rect = Rect::from_min_size(ui.cursor().min, vec2(strip_w, 28.0));
+            let over_strip = ui.rect_contains_pointer(strip_rect);
+            egui::ScrollArea::horizontal()
+                .id_salt(("tabstrip", pi))
+                .max_width(strip_w)
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                .show(ui, |ui| {
+                    if over_strip {
+                        // the mouse wheel scrolls the strip sideways
+                        let d = ui.input(|i| i.smooth_scroll_delta);
+                        if d.y != 0.0 {
+                            ui.scroll_with_delta(vec2(d.y, 0.0));
+                        }
+                    }
+                    ui.horizontal(|ui| {
+                        for (i, t) in tabs.iter().enumerate() {
+                            let sel = i == *ai;
+                            let mut label = t.title();
+                            if label.chars().count() > 20 {
+                                label = format!("{}…", label.chars().take(19).collect::<String>());
+                            }
+                            let (r, close) = tab_pill(ui, &label, sel, n > 1);
+                            if sel && reveal {
+                                r.scroll_to_me(Some(Align::Center));
+                            }
+                            let r = r.on_hover_text(t.path.display().to_string());
+                            if r.drag_started() {
+                                evs.push(Ev::TabDrag(pi, i));
+                            }
+                            if close || (r.middle_clicked() && n > 1) {
+                                evs.push(Ev::CloseTab(pi, i));
+                            } else if r.clicked() {
+                                evs.push(Ev::Tab(pi, i));
+                            }
+                            r.context_menu(|ui| {
+                                tab_menu_item(ui, evs, pi, i, "Close", n > 1, TabCmd::Close);
+                                tab_menu_item(ui, evs, pi, i, "Close other tabs", n > 1, TabCmd::Others);
+                                tab_menu_item(ui, evs, pi, i, "Close tabs to the left", i > 0, TabCmd::Left);
+                                tab_menu_item(ui, evs, pi, i, "Close tabs to the right", i + 1 < n, TabCmd::Right);
+                                ui.separator();
+                                tab_menu_item(ui, evs, pi, i, "Duplicate tab", true, TabCmd::Duplicate);
+                                tab_menu_item(ui, evs, pi, i, "Open in other pane", true, TabCmd::OpenOther);
+                                tab_menu_item(ui, evs, pi, i, "Move to other pane", n > 1, TabCmd::MoveOther);
+                                ui.separator();
+                                tab_menu_item(ui, evs, pi, i, "Copy path", true, TabCmd::CopyPath);
+                            });
+                        }
+                    });
+                });
             if icon_btn(ui, Ico::Plus, true, "New tab (Ctrl+T)").clicked() {
                 evs.push(Ev::NewTab(pi));
             }
+            let all = icon_btn(ui, Ico::Down, true, "All tabs");
+            egui::Popup::menu(&all).show(|ui| {
+                ui.set_min_width(240.0);
+                egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                    for (i, t) in tabs.iter().enumerate() {
+                        let label = format!("{}   {}", t.title(), t.path.display());
+                        if ui.selectable_label(i == *ai, label).clicked() {
+                            evs.push(Ev::Tab(pi, i));
+                            ui.close();
+                        }
+                    }
+                });
+            });
         });
 
         let tab = &mut tabs[*ai];
@@ -1435,6 +1606,7 @@ enum Ico {
     Up,
     Plus,
     Close,
+    Down,
 }
 
 fn paint_icon(p: &egui::Painter, c: Pos2, ico: Ico, col: Color32) {
@@ -1445,6 +1617,7 @@ fn paint_icon(p: &egui::Painter, c: Pos2, ico: Ico, col: Color32) {
         Ico::Up => &[[(0.0, 5.0), (0.0, -5.0)], [(0.0, -5.0), (-4.0, -1.0)], [(0.0, -5.0), (4.0, -1.0)]],
         Ico::Plus => &[[(-4.5, 0.0), (4.5, 0.0)], [(0.0, -4.5), (0.0, 4.5)]],
         Ico::Close => &[[(-3.0, -3.0), (3.0, 3.0)], [(-3.0, 3.0), (3.0, -3.0)]],
+        Ico::Down => &[[(-4.0, -2.0), (0.0, 2.0)], [(0.0, 2.0), (4.0, -2.0)]],
     };
     for [a, b] in segs {
         let (pa, pb) = (c + vec2(a.0, a.1), c + vec2(b.0, b.1));
@@ -1464,6 +1637,13 @@ fn icon_btn(ui: &mut Ui, ico: Ico, enabled: bool, tip: &str) -> egui::Response {
     let base = ui.visuals().text_color();
     paint_icon(ui.painter(), rect.center(), ico, if enabled { base } else { base.gamma_multiply(0.3) });
     if enabled { resp.on_hover_text(tip) } else { resp }
+}
+
+fn tab_menu_item(ui: &mut Ui, evs: &mut Vec<Ev>, pi: usize, i: usize, label: &str, enabled: bool, cmd: TabCmd) {
+    if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+        evs.push(Ev::TabMenu(pi, i, cmd));
+        ui.close();
+    }
 }
 
 /// Pill-shaped tab; returns (response, close_clicked).
@@ -2019,6 +2199,36 @@ impl App {
                     }
                     self.dirty = true;
                 }
+            }
+            Ev::TabMenu(pi, i, cmd) => {
+                self.active = pi;
+                let Some(path) = self.panes[pi].tabs.get(i).map(|t| t.path.clone()) else { return };
+                match cmd {
+                    TabCmd::Close => self.apply(ctx, Ev::CloseTab(pi, i)),
+                    TabCmd::Others => self.close_tabs_where(pi, i, |_| true),
+                    TabCmd::Left => self.close_tabs_where(pi, i, |j| j < i),
+                    TabCmd::Right => self.close_tabs_where(pi, i, |j| j > i),
+                    TabCmd::Duplicate => {
+                        self.panes[pi].active = i;
+                        self.open_new_tab(pi, path);
+                    }
+                    TabCmd::OpenOther => {
+                        let o = 1 - pi;
+                        self.open_new_tab(o, path);
+                        self.active = o;
+                    }
+                    TabCmd::MoveOther => {
+                        if self.panes[pi].tabs.len() > 1 {
+                            self.apply(ctx, Ev::CloseTab(pi, i));
+                            self.closed_tabs.pop(); // moved, not closed
+                            let o = 1 - pi;
+                            self.open_new_tab(o, path);
+                            self.active = o;
+                        }
+                    }
+                    TabCmd::CopyPath => ctx.copy_text(path.display().to_string()),
+                }
+                self.dirty = true;
             }
             Ev::NewTab(pi) => {
                 self.active = pi;
