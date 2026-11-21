@@ -18,6 +18,7 @@ to change the code safely. The user writes Slovak; answer in Slovak, keep code/c
 | `model.rs` | `Entry`, `Tab` (entries/view/cursor/selection/history/sort/filter), `rebuild_view`, path helpers |
 | `search.rs` | in-folder search: `SearchMode` (Smart/Fuzzy/Wildcard/Regex), `compile -> Matcher` (score/ranges), `glob_match` |
 | `archive.rs` | read-only zip/jar as folders: virtual paths (zip file path + inner path) (`split`, `list`, `extract`); hooked into `model::read_dir` and `ops` |
+| `thumbs.rs` | async image thumbnails for the grid view (texture cache) |
 | `preview.rs` | Quick Look panel (F3): background loader + UI |
 | `deep.rs` | "Subfolders" search: background BFS walker streaming `DeepMsg::Batch` |
 | `actions.rs` | `Action` enum, `bindings()` key table, palette list, names |
@@ -50,6 +51,12 @@ to change the code safely. The user writes Slovak; answer in Slovak, keep code/c
   set `Tab.loading` and finish in `poll_load` (called from `App::tick`). Visits are recorded only on arrival.
 - **Archives:** a path is virtual when an ancestor is an existing `.zip/.jar` file (`archive::split`). `App::run` blocks
   write actions in archives; `ops` extracts when a copy source is inside one.
+- **Search filters:** `search::compile` strips `:size/:age/:date/:type/:ext` tokens into `Matcher.filters`
+  (`filters_ok(&Entry)`); the rest is the name query. `rebuild_view` and the deep walker apply both.
+- **Content search:** `SearchOpts.content` (implies deep). `deep.rs` feeds files to 4 scanner threads; results carry
+  `Entry.snippet`; `rebuild_view` accepts deep entries without re-matching their names in content mode.
+- **Views:** `Store.view` (`ViewMode`) and `Store.cols`; `Tab.row_h` / `Tab.grid_cols` are set by `ui_pane` each frame
+  and used by `ensure_visible` and keyboard paging. `item_interact` is shared by rows and grid cells.
 - **Compare:** `App.compare` + `diff` (name → `Diff`) recomputed each tick; rows draw a colored stripe.
 - **Window geometry** is saved in `Store.window` / `jobs_win` (`WinGeom`, validated against the virtual screen).
 - **Operations window** is a separate OS window (`show_viewport_immediate`), not an in-app panel.

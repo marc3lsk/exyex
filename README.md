@@ -51,6 +51,28 @@ Reparse points / symlinks are not followed, hidden items follow the "show hidden
 A manual **exclude** box appears next to the chip: names or wildcards separated by commas, e.g.
 `node_modules, .git, *.tmp`. Nothing is excluded unless you type it; the list is remembered.
 
+### Filters (`:` prefix)
+Tokens that start with a colon filter by metadata and combine with the name query and with each other:
+
+| Filter | Meaning |
+|---|---|
+| `:size>10mb` `:size<1kb` `:size=0` | file size (`b kb mb gb tb`; items that are folders never match) |
+| `:age<7d` / `:modified<7d` | modified less than 7 days ago (`min h d w mo y`); `>` = older |
+| `:date>2024-01-01` / `:modified<2023-06-01` | modified after / before a date (`=` = that day) |
+| `:type=img` / `:type=video,audio` / `:ext=rs,toml` | kind: `img video audio doc archive code dir file` or plain extensions |
+
+Example: `report :type=doc :age<30d :size>100kb`. A malformed filter turns the box red.
+
+### Content search (Alt+T)
+The **Content** chip searches *inside* files in all subfolders (4 threads, binary files and files over 8 MB are skipped).
+The query is matched per line using the selected mode (Smart / Fuzzy / Wildcard / Regex); each result shows the first
+matching line (`12: text  (+3 more)`). Narrow it with filters, e.g. `TODO :ext=rs :age<7d`, and with the exclude box.
+
+## Views and columns
+**Alt+V** (or the ☰ button bottom right of a pane) cycles *Details → Compact → Grid*. Grid shows image thumbnails
+(png/jpg/gif/bmp/webp/ico/svg) and large shell icons; arrow keys move in 2D there. Right-click the column header or the
+view button to choose the columns (Type / Size / Modified). The choice is remembered.
+
 ## Quick Look, compare, archives
 - **F3 – Quick Look:** side panel that follows the cursor: text (first 64 KB), images (png/jpg/gif/bmp/webp/ico),
   folder summaries, zip contents, hex head for binary files. Close with the ✕ or F3 again.

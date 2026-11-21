@@ -156,6 +156,7 @@ pub struct App {
     /// Tab being dragged to the other pane: (pane, tab index).
     tab_drag: Option<(usize, usize)>,
     tab_rects: [Vec<Rect>; 2],
+    thumbs: crate::thumbs::Thumbs,
     preview: bool,
     pv: crate::preview::Previewer,
     compare: bool,
@@ -331,6 +332,7 @@ impl App {
             ipc,
             tab_drag: None,
             tab_rects: [vec![], vec![]],
+            thumbs: Default::default(),
             preview: false,
             pv: Default::default(),
             compare: false,
@@ -641,6 +643,9 @@ impl App {
         self.sync_watches();
         self.apply_fs_events(ctx);
         self.refresh_diff();
+        if self.thumbs.poll(ctx) {
+            ctx.request_repaint_after(Duration::from_millis(40));
+        }
         let mut loading = false;
         let mut arrived = vec![];
         let mut errors = vec![];
@@ -857,6 +862,25 @@ impl App {
                 }
             }
             QuickLook => self.preview = !self.preview,
+            ViewCycle | ViewDetails | ViewCompact | ViewGrid => {
+                self.store.view = match a {
+                    ViewDetails => ViewMode::Details,
+                    ViewCompact => ViewMode::Compact,
+                    ViewGrid => ViewMode::Grid,
+                    _ => self.store.view.next(),
+                };
+                self.dirty = true;
+                self.say(format!("View: {}", self.store.view.label()));
+            }
+            ColExt | ColSize | ColDate => {
+                let c = &mut self.store.cols;
+                match a {
+                    ColExt => c.ext = !c.ext,
+                    ColSize => c.size = !c.size,
+                    _ => c.date = !c.date,
+                }
+                self.dirty = true;
+            }
             CompareToggle => {
                 self.compare = !self.compare;
                 self.refresh_diff();
@@ -1185,15 +1209,21 @@ impl App {
         }
 
         // Cursor movement
-        let page = ((self.tab().view_h / ROW_H) as isize - 1).max(1);
-        let moves: [(Key, isize); 6] = [
-            (Key::ArrowUp, -1),
-            (Key::ArrowDown, 1),
+        let cols = self.tab().grid_cols.max(1) as isize;
+        let rows = ((self.tab().view_h / self.tab().row_h.max(1.0)) as isize - 1).max(1);
+        let page = rows * cols;
+        let mut moves: Vec<(Key, isize)> = vec![
+            (Key::ArrowUp, -cols),
+            (Key::ArrowDown, cols),
             (Key::PageUp, -page),
             (Key::PageDown, page),
             (Key::Home, isize::MIN / 2),
             (Key::End, isize::MAX / 2),
         ];
+        if self.tab().grid_cols > 0 {
+            moves.push((Key::ArrowLeft, -1));
+            moves.push((Key::ArrowRight, 1));
+        }
         for (k, d) in moves {
             for (m, extend) in [(Modifiers::SHIFT, true), (Modifiers::NONE, false)] {
                 if ctx.input_mut(|i| i.consume_key(m, k)) {
@@ -1676,7 +1706,7 @@ impl App {
 
     fn ui_pane(&mut self, ui: &mut Ui, pi: usize, evs: &mut Vec<Ev>) {
         let ctx = ui.ctx().clone();
-        let App { panes, icons, store, clipboard, drag, active, drives, inline, diff, .. } = self;
+        let App { panes, icons, thumbs, store, clipboard, drag, active, drives, inline, diff, .. } = self;
         let diff = &diff[pi];
         let is_active = *active == pi;
         let dark = ui.visuals().dark_mode;
@@ -1832,6 +1862,7 @@ impl App {
             let mut mode_key: Option<SearchMode> = None;
             let mut case_key = false;
             let mut deep_key = false;
+            let mut content_key = false;
             let mut show_key = false;
             if focused {
                 ctx.input_mut(|i| {
@@ -1849,13 +1880,14 @@ impl App {
                     }
                     case_key = i.consume_key(Modifiers::ALT, Key::C);
                     deep_key = i.consume_key(Modifiers::ALT, Key::S);
+                    content_key = i.consume_key(Modifiers::ALT, Key::T);
                     show_key = i.consume_key(Modifiers::ALT, Key::Enter);
                 });
             }
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
-                let w = (ui.available_width() - 400.0 - if opts.deep { 170.0 } else { 0.0 }).max(120.0);
-                let mut out = egui::TextEdit::singleline(&mut tab.filter).id(edit_id).hint_text(opts.mode.hint()).desired_width(w).show(ui);
+                let w = (ui.available_width() - 300.0 - if opts.deep || opts.content { 170.0 } else { 0.0 }).max(120.0);
+                let mut out = egui::TextEdit::singleline(&mut tab.filter).id(edit_id).hint_text(if opts.content { "text to find inside files  ·  re:regex  ·  :ext=rs  :size<1mb  :age<7d" } else { opts.mode.hint() }).desired_width(w).show(ui);
                 let r = out.response.clone();
                 if err.is_some() {
                     ui.painter().rect_stroke(r.rect.expand(1.0), 4.0, Stroke::new(1.5, ui.visuals().error_fg_color), egui::StrokeKind::Outside);
@@ -1873,7 +1905,7 @@ impl App {
                     tab.want_scroll = Some(0.0);
                 }
                 // result navigation without leaving the box
-                let page = ((tab.view_h / ROW_H) as isize - 1).max(1);
+                let page = ((tab.view_h / tab.row_h.max(1.0)) as isize - 1).max(1);
                 if up {
                     tab.move_cursor(-1, false);
                 }
@@ -1902,17 +1934,23 @@ impl App {
                 }
                 // mode chips + case toggle
                 for m in SearchMode::ALL {
-                    if chip(ui, m.label(), opts.mode == m, None).on_hover_text(m.tooltip()).clicked() {
+                    if chip(ui, m.icon(), opts.mode == m, None).on_hover_text(m.tooltip()).clicked() {
                         evs.push(Ev::SetSearch(SearchOpts { mode: m, ..opts }));
                     }
                 }
                 if chip(ui, "Aa", opts.match_case, None).on_hover_text("Match case (Alt+C)").clicked() {
                     evs.push(Ev::SetSearch(SearchOpts { match_case: !opts.match_case, ..opts }));
                 }
-                if chip(ui, "Subfolders", opts.deep, None).on_hover_text("Search inside subfolders too (Alt+S)\nResults show the path relative to this folder.").clicked() || deep_key {
-                    evs.push(Ev::SetSearch(SearchOpts { deep: !opts.deep, ..opts }));
+                let sub_on = opts.deep || opts.content;
+                if chip(ui, "↳", sub_on, None).on_hover_text("Subfolders (Alt+S)
+Search inside subfolders too.\nResults show the path relative to this folder.").clicked() || deep_key {
+                    evs.push(Ev::SetSearch(SearchOpts { deep: !sub_on, content: false, ..opts }));
                 }
-                if opts.deep {
+                if chip(ui, "¶", opts.content, None).on_hover_text("Content (Alt+T)
+Search inside the files, in all subfolders.\nShows the first matching line. Binary files and files over 8 MB are skipped.\nCombine with :ext=rs, :type=code, :size<1mb, :age<7d").clicked() || content_key {
+                    evs.push(Ev::SetSearch(SearchOpts { content: !opts.content, deep: opts.deep || !opts.content, ..opts }));
+                }
+                if sub_on {
                     let before = tab.exclude.clone();
                     let ex = egui::TextEdit::singleline(&mut tab.exclude)
                         .hint_text("exclude: node_modules, .git, *.tmp")
@@ -1949,14 +1987,22 @@ impl App {
         }
 
         // --- column header
+        let view = store.view;
+        let cols_cfg = store.cols;
+        if view != ViewMode::Grid {
         let (hdr, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::hover());
-        let (c_name, c_size, c_date) = columns(hdr);
+        let (c_name, c_ext, c_size, c_date) = columns(hdr, cols_cfg);
         for (rect, key, label, align) in [
             (c_name, SortKey::Name, "Name", Align2::LEFT_CENTER),
+            (c_ext, SortKey::Ext, "Type", Align2::LEFT_CENTER),
             (c_size, SortKey::Size, "Size", Align2::RIGHT_CENTER),
             (c_date, SortKey::Modified, "Modified", Align2::LEFT_CENTER),
         ] {
+            if rect.width() < 1.0 {
+                continue;
+            }
             let r = ui.interact(rect, ui.scope_id().with(("hdr", pi, key as u8)), Sense::click());
+            r.context_menu(|ui| view_menu(ui, evs, view, cols_cfg));
             if r.hovered() {
                 ui.painter().rect_filled(rect, 2.0, tint(dark, 10));
             }
@@ -1968,11 +2014,23 @@ impl App {
             }
         }
         ui.painter().hline(hdr.x_range(), hdr.bottom(), Stroke::new(1.0, line_color(dark)));
+        }
 
         // --- file list
         let footer_h = 22.0;
         let list_h = (ui.available_height() - footer_h).max(40.0);
         let list_w = ui.available_width();
+        let compact = view == ViewMode::Compact;
+        let (cell_w_target, cell_h) = (120.0_f32, 116.0_f32);
+        let gcols = ((list_w - 14.0) / cell_w_target).floor().max(1.0) as usize;
+        tab.grid_cols = if view == ViewMode::Grid { gcols } else { 0 };
+        tab.row_h = match view {
+            ViewMode::Details => ROW_H,
+            ViewMode::Compact => 19.0,
+            ViewMode::Grid => cell_h,
+        };
+        let row_h = tab.row_h;
+        let fs = if compact { 13.0 } else { 14.0 };
         ui.allocate_ui(vec2(list_w, list_h), |ui| {
             // Right-click on the empty space below the files. Registered before the
             // rows, so rows (added later) keep priority over it.
@@ -2013,10 +2071,97 @@ impl App {
                 sa = sa.vertical_scroll_offset(y.max(0.0));
             }
             let n = tab.view.len();
-            let out = sa.show_rows(ui, ROW_H, n, |ui, range| {
+            let out = if view == ViewMode::Grid {
+              sa.show_rows(ui, cell_h, n.div_ceil(gcols), |ui, range| {
+                for r in range {
+                    let (row_rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), cell_h), Sense::hover());
+                    let cw = row_rect.width() / gcols as f32;
+                    for c in 0..gcols {
+                        let vi = r * gcols + c;
+                        if vi >= n {
+                            break;
+                        }
+                        let e = &tab.entries[tab.view[vi]];
+                        let rect = Rect::from_min_size(pos2(row_rect.left() + c as f32 * cw, row_rect.top()), vec2(cw, cell_h)).shrink(2.0);
+                        if !ui.is_rect_visible(rect) {
+                            continue;
+                        }
+                        let resp = ui.interact(rect, ui.id().with(("cell", pi, vi)), Sense::click_and_drag());
+                        let is_cursor = vi == tab.cursor;
+                        let selected = tab.selected.contains(&e.path);
+                        let drop_target = dragging && e.is_dir && ui.rect_contains_pointer(rect) && !drag_paths.contains(&e.path);
+                        let p = ui.painter();
+                        if drop_target {
+                            p.rect_filled(rect, 6.0, ACCENT.gamma_multiply(0.5));
+                            evs.push(Ev::DropHover(e.path.clone()));
+                        } else if is_cursor {
+                            let c = match (is_active, dark) {
+                                (true, true) => ACCENT.gamma_multiply(0.55),
+                                (true, false) => Color32::from_rgb(200, 221, 253),
+                                (false, _) => tint(dark, 28),
+                            };
+                            p.rect_filled(rect, 6.0, c);
+                        } else if selected {
+                            p.rect_filled(rect, 6.0, selected_text(dark).gamma_multiply(0.13));
+                        } else if resp.hovered() {
+                            p.rect_filled(rect, 6.0, tint(dark, 10));
+                        }
+                        // thumbnail (images) or a large shell icon
+                        let area = Rect::from_min_size(rect.min + vec2(4.0, 4.0), vec2(rect.width() - 8.0, 74.0));
+                        let mut drawn = false;
+                        if !e.is_dir && !e.is_up && crate::thumbs::is_thumbnailable(&e.ext, e.size) {
+                            if let Some(t) = thumbs.get(&ctx, &e.path) {
+                                let sz = t.size_vec2();
+                                let k = (area.width() / sz.x).min(area.height() / sz.y).min(1.0);
+                                let img = Rect::from_center_size(area.center(), sz * k);
+                                egui::Image::new(egui::load::SizedTexture::new(t.id(), sz * k)).corner_radius(3).paint_at(ui, img);
+                                drawn = true;
+                            }
+                        }
+                        if !drawn {
+                            if let Some(t) = icons.get_large(&ctx, &e.ext, e.is_dir) {
+                                let sz = vec2(32.0, 32.0);
+                                egui::Image::new(egui::load::SizedTexture::new(t.id(), sz)).paint_at(ui, Rect::from_center_size(area.center(), sz));
+                            }
+                        }
+                        let mut col = ui.visuals().text_color();
+                        if selected {
+                            col = selected_text(dark);
+                        }
+                        if e.hidden || cut.is_some_and(|c| c.contains(&e.path)) {
+                            col = col.gamma_multiply(0.55);
+                        }
+                        if dark && is_cursor && is_active && !drop_target && !selected {
+                            col = Color32::WHITE;
+                        }
+                        if !diff.is_empty() && !e.is_up {
+                            if let Some(d) = diff.get(&e.name.to_lowercase()) {
+                                if !selected {
+                                    col = d.style(dark).0;
+                                }
+                            }
+                        }
+                        let name_rect = Rect::from_min_max(pos2(rect.left() + 3.0, rect.top() + 80.0), pos2(rect.right() - 3.0, rect.bottom() - 2.0));
+                        if inline.as_ref().is_some_and(|r| r.pi == pi && r.path == e.path) {
+                            if let Some(ir) = inline.as_mut() {
+                                inline_edit(ui, Rect::from_min_size(name_rect.min, vec2(name_rect.width(), 22.0)), ir, e.is_dir);
+                            }
+                        } else {
+                            let painter = ui.painter().with_clip_rect(name_rect);
+                            let galley = painter.layout(e.name.clone(), FontId::proportional(12.5), col, name_rect.width());
+                            let x = name_rect.center().x - galley.size().x / 2.0;
+                            painter.galley(pos2(x.max(name_rect.left()), name_rect.top()), galley, col);
+                        }
+                        resp.clone().on_hover_text(format!("{}\n{}  {}", e.name, if e.is_dir { String::new() } else { fmt_size(e.size) }, fmt_time(e.modified)));
+                        item_interact(ui, &resp, pi, vi, e, selected, tab, evs);
+                    }
+                }
+              })
+            } else {
+              sa.show_rows(ui, row_h, n, |ui, range| {
                 for vi in range {
                     let e = &tab.entries[tab.view[vi]];
-                    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::click_and_drag());
+                    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::click_and_drag());
                     if !ui.is_rect_visible(rect) {
                         continue;
                     }
@@ -2040,7 +2185,7 @@ impl App {
                     } else if resp.hovered() {
                         p.rect_filled(rect, 0.0, tint(dark, 10));
                     }
-                    let (c_name, c_size, c_date) = columns(rect);
+                    let (c_name, c_ext, c_size, c_date) = columns(rect, cols_cfg);
                     // icon
                     let icon_rect = Rect::from_center_size(pos2(rect.left() + 14.0, rect.center().y), vec2(16.0, 16.0));
                     if let Some(tex) = icons.get(&ctx, &e.ext, e.is_dir) {
@@ -2077,9 +2222,10 @@ impl App {
                     } else {
                         let name_x = c_name.left() + 26.0;
                         let painter = ui.painter().with_clip_rect(c_name);
-                        let galley = painter.layout_no_wrap(e.name.clone(), FontId::proportional(14.0), col);
+                        let galley = painter.layout_no_wrap(e.name.clone(), FontId::proportional(fs), col);
                         let top = rect.center().y - galley.size().y / 2.0;
-                        if !tab.filter.is_empty() {
+                        let gw = galley.size().x;
+                        if !tab.filter.is_empty() && !(tab.search.content && e.deep) {
                             let hl = if dark { Color32::from_rgba_unmultiplied(255, 200, 0, 80) } else { Color32::from_rgba_unmultiplied(255, 190, 0, 120) };
                             for (a, b) in tab.matcher.ranges(&e.name) {
                                 let x0 = galley.pos_from_cursor(egui::text::CCursor::new(a)).min.x;
@@ -2088,9 +2234,16 @@ impl App {
                             }
                         }
                         painter.galley(pos2(name_x, top), galley, col);
+                        if !e.snippet.is_empty() {
+                            let sc = if on_accent { Color32::from_gray(225) } else { ui.visuals().weak_text_color() };
+                            painter.text(pos2(name_x + gw + 14.0, rect.center().y), Align2::LEFT_CENTER, &e.snippet, FontId::monospace(fs - 1.5), sc);
+                        }
                     }
                     let dim = if on_accent { Color32::from_gray(225) } else { ui.visuals().weak_text_color() };
                     let p = ui.painter();
+                    if c_ext.width() > 1.0 && !e.is_dir && !e.is_up {
+                        p.with_clip_rect(c_ext).text(pos2(c_ext.left(), rect.center().y), Align2::LEFT_CENTER, &e.ext, FontId::proportional(12.5), dim);
+                    }
                     p.with_clip_rect(c_size).text(
                         pos2(c_size.right(), rect.center().y),
                         Align2::RIGHT_CENTER,
@@ -2100,48 +2253,10 @@ impl App {
                     );
                     p.with_clip_rect(c_date).text(pos2(c_date.left(), rect.center().y), Align2::LEFT_CENTER, if e.is_up { String::new() } else { fmt_time(e.modified) }, FontId::proportional(12.5), dim);
 
-                    // interaction
-                    let m = ui.input(|i| i.modifiers);
-                    if resp.clicked() {
-                        evs.push(Ev::Click { pi, vi, ctrl: m.ctrl, shift: m.shift });
-                    }
-                    if resp.double_clicked() {
-                        evs.push(Ev::Open { pi, vi });
-                    }
-                    if resp.middle_clicked() {
-                        evs.push(Ev::MiddleOpen { pi, vi });
-                    }
-                    if resp.secondary_clicked() {
-                        evs.push(Ev::ContextAt { pi, vi });
-                    }
-                    if resp.drag_started() && !e.is_up {
-                        let paths = if selected { tab.targets() } else { vec![e.path.clone()] };
-                        evs.push(Ev::DragStart { pi, paths });
-                    }
-                    resp.context_menu(|ui| {
-                        for (label, a) in [
-                            ("Open", Action::Open),
-                            ("Open in new tab", Action::OpenInNewTab),
-                            ("Rename", Action::Rename),
-                            ("Copy to other pane", Action::Copy),
-                            ("Move to other pane", Action::Move),
-                            ("Copy", Action::ClipCopy),
-                            ("Cut", Action::ClipCut),
-                            ("Paste", Action::ClipPaste),
-                            ("Copy path", Action::CopyPath),
-                            ("New folder", Action::NewFolder),
-                            ("Open containing folder  (Alt+Enter)", Action::ShowInFolder),
-                            ("Show in Windows Explorer", Action::Reveal),
-                            ("Delete", Action::Delete),
-                        ] {
-                            if ui.button(label).clicked() {
-                                evs.push(Ev::Run(a));
-                                ui.close();
-                            }
-                        }
-                    });
+                    item_interact(ui, &resp, pi, vi, e, selected, tab, evs);
                 }
-            });
+              })
+            };
             tab.scroll_y = out.state.offset().y;
             tab.view_h = out.inner_rect.height();
         });
@@ -2158,6 +2273,18 @@ impl App {
                     ui.weak(format!("· {}", e.name));
                 }
             }
+            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                let icon = match view {
+                    ViewMode::Details => "☰",
+                    ViewMode::Compact => "≡",
+                    ViewMode::Grid => "▦",
+                };
+                let b = ui.add(egui::Button::new(icon).frame(false)).on_hover_text(format!("View: {} (Alt+V) – right-click for options", view.label()));
+                if b.clicked() {
+                    evs.push(Ev::Run(Action::ViewCycle));
+                }
+                b.context_menu(|ui| view_menu(ui, evs, view, cols_cfg));
+            });
         });
     }
 }
@@ -2225,12 +2352,91 @@ fn diff_map(a: &Tab, b: &Tab) -> HashMap<String, Diff> {
     out
 }
 
-fn columns(r: Rect) -> (Rect, Rect, Rect) {
-    let date = Rect::from_min_max(pos2(r.right() - 134.0, r.top()), pos2(r.right() - 6.0, r.bottom()));
-    let size = Rect::from_min_max(pos2(date.left() - 84.0, r.top()), pos2(date.left() - 8.0, r.bottom()));
-    let name = Rect::from_min_max(r.min, pos2(size.left() - 6.0, r.bottom()));
-    (name, size, date)
+/// Splits a row into (name, type, size, date) rects; hidden columns get a zero-width rect.
+fn columns(r: Rect, c: Cols) -> (Rect, Rect, Rect, Rect) {
+    let mut x = r.right() - 6.0;
+    let mut take = |w: f32, on: bool| -> Rect {
+        if !on {
+            return Rect::from_min_max(pos2(x, r.top()), pos2(x, r.bottom()));
+        }
+        let rc = Rect::from_min_max(pos2(x - w, r.top()), pos2(x, r.bottom()));
+        x -= w + 8.0;
+        rc
+    };
+    let date = take(128.0, c.date);
+    let size = take(76.0, c.size);
+    let ext = take(54.0, c.ext);
+    let name = Rect::from_min_max(r.min, pos2(x + 2.0, r.bottom()));
+    (name, ext, size, date)
 }
+
+/// View mode + column toggles (header and footer context menu).
+fn view_menu(ui: &mut Ui, evs: &mut Vec<Ev>, view: ViewMode, cols: Cols) {
+    ui.label(egui::RichText::new("View").weak());
+    for (label, a, on) in [
+        ("Details", Action::ViewDetails, view == ViewMode::Details),
+        ("Compact list", Action::ViewCompact, view == ViewMode::Compact),
+        ("Grid with thumbnails", Action::ViewGrid, view == ViewMode::Grid),
+    ] {
+        if ui.selectable_label(on, label).clicked() {
+            evs.push(Ev::Run(a));
+            ui.close();
+        }
+    }
+    ui.separator();
+    ui.label(egui::RichText::new("Columns").weak());
+    for (label, a, on) in [("Type", Action::ColExt, cols.ext), ("Size", Action::ColSize, cols.size), ("Modified", Action::ColDate, cols.date)] {
+        if ui.checkbox(&mut { on }, label).clicked() {
+            evs.push(Ev::Run(a));
+        }
+    }
+}
+
+/// Click / drag / context-menu handling shared by the list rows and the grid cells.
+fn item_interact(ui: &mut Ui, resp: &egui::Response, pi: usize, vi: usize, e: &Entry, selected: bool, tab: &Tab, evs: &mut Vec<Ev>) {
+    // interaction
+    let m = ui.input(|i| i.modifiers);
+    if resp.clicked() {
+        evs.push(Ev::Click { pi, vi, ctrl: m.ctrl, shift: m.shift });
+    }
+    if resp.double_clicked() {
+        evs.push(Ev::Open { pi, vi });
+    }
+    if resp.middle_clicked() {
+        evs.push(Ev::MiddleOpen { pi, vi });
+    }
+    if resp.secondary_clicked() {
+        evs.push(Ev::ContextAt { pi, vi });
+    }
+    if resp.drag_started() && !e.is_up {
+        let paths = if selected { tab.targets() } else { vec![e.path.clone()] };
+        evs.push(Ev::DragStart { pi, paths });
+    }
+    resp.context_menu(|ui| {
+        for (label, a) in [
+            ("Open", Action::Open),
+            ("Open in new tab", Action::OpenInNewTab),
+            ("Rename", Action::Rename),
+            ("Copy to other pane", Action::Copy),
+            ("Move to other pane", Action::Move),
+            ("Copy", Action::ClipCopy),
+            ("Cut", Action::ClipCut),
+            ("Paste", Action::ClipPaste),
+            ("Copy path", Action::CopyPath),
+            ("New folder", Action::NewFolder),
+            ("Open containing folder  (Alt+Enter)", Action::ShowInFolder),
+            ("Show in Windows Explorer", Action::Reveal),
+            ("Delete", Action::Delete),
+        ] {
+            if ui.button(label).clicked() {
+                evs.push(Ev::Run(a));
+                ui.close();
+            }
+        }
+    });
+}
+
+
 
 #[derive(Clone, Copy, PartialEq)]
 enum Ico {

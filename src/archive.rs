@@ -96,7 +96,7 @@ pub fn list(zip: &Path, inner: &str) -> io::Result<Vec<Entry>> {
         .map(|(name, (is_dir, size, modified))| {
             let path = virtual_path(zip, &format!("{prefix}{name}"));
             let ext = if is_dir { String::new() } else { path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default() };
-            Entry { name, path, is_dir, size, modified, hidden: false, is_up: false, deep: false, ext }
+            Entry { name, path, is_dir, size, modified, hidden: false, is_up: false, deep: false, snippet: String::new(), ext }
         })
         .collect())
 }

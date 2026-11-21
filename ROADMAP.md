@@ -18,14 +18,14 @@ Legenda: ✅ hotové · 🟡 rozpracované / čiastočné · ⬜ nápad
 
 ## Hľadanie
 - ✅ Smart / Fuzzy / Wildcard / Regex, hľadanie v podpriečinkoch, manuálny exclude.
-- ⬜ **Hľadanie podľa obsahu súborov** (grep) v podpriečinkoch.
-- ⬜ **Filtre podľa veľkosti a dátumu** – `size:>10mb`, `modified:<7d`, `type:img`.
+- ✅ **Hľadanie podľa obsahu súborov** (grep) v podpriečinkoch – čip *Content* / `Alt+T`, úryvok prvého riadku.
+- ✅ **Filtre podľa veľkosti, dátumu a typu** – `:size>10mb`, `:age<7d`, `:type=img` (dvojbodka na začiatku).
 - ⬜ **Uložené hľadania.**
 
 ## Používanie
 - ⬜ **Workspaces** – uložená sada tabov v oboch paneloch, prepínanie jedným príkazom.
 - ⬜ **Veľkosti priečinkov** v stĺpci Size (počítané na pozadí) + prehľad využitia disku.
-- ⬜ **Iné zobrazenia** – mriežka s náhľadmi obrázkov, kompaktný režim, vlastné stĺpce.
+- ✅ **Iné zobrazenia** – Details / Compact / Grid s náhľadmi obrázkov, voliteľné stĺpce (Type, Size, Modified).
 - ⬜ **Undo poslednej operácie** (presun / premenovanie) + história operácií.
 
 ## Kvalita

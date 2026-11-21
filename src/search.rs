@@ -1,7 +1,9 @@
 //! In-folder search: Smart / Fuzzy / Wildcard / Regex matching with scoring
 //! (for ranking) and match positions (for highlighting).
 
+use crate::model::Entry;
 use regex::{Regex, RegexBuilder};
+use std::time::{Duration, SystemTime};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug, Default)]
@@ -27,9 +29,19 @@ impl SearchMode {
         }
     }
 
+    /// Short glyph for the compact search bar (the tooltip carries the full name).
+    pub fn icon(self) -> &'static str {
+        match self {
+            SearchMode::Smart => "✦",
+            SearchMode::Fuzzy => "≈",
+            SearchMode::Wildcard => "*",
+            SearchMode::Regex => ".*",
+        }
+    }
+
     pub fn hint(self) -> &'static str {
         match self {
-            SearchMode::Smart => "type to filter  ·  *.rs  ·  !exclude  ·  ~fuzzy  ·  re:regex",
+            SearchMode::Smart => "type to filter  ·  *.rs  ·  !exclude  ·  ~fuzzy  ·  re:regex  ·  :size>10mb  :age<7d  :type=img",
             SearchMode::Fuzzy => "fuzzy: letters in order, e.g. rdme finds README.md",
             SearchMode::Wildcard => "wildcard: * and ?, e.g. *.rs or report_??.pdf",
             SearchMode::Regex => "regular expression, e.g. ^img_\\d+\\.(jpg|png)$",
@@ -53,6 +65,8 @@ pub struct SearchOpts {
     pub match_case: bool,
     /// Also search inside subfolders (background walk).
     pub deep: bool,
+    /// Search the *contents* of files (implies subfolders).
+    pub content: bool,
 }
 
 enum Tok {
@@ -72,11 +86,12 @@ enum Kind {
 pub struct Matcher {
     kind: Kind,
     case: bool,
+    filters: Vec<Filter>,
 }
 
 impl Default for Matcher {
     fn default() -> Self {
-        Matcher { kind: Kind::All, case: false }
+        Matcher { kind: Kind::All, case: false, filters: vec![] }
     }
 }
 
@@ -215,11 +230,170 @@ fn build_regex(pat: &str, case: bool) -> Kind {
     }
 }
 
+// ------------------------------------------------------------------ filters
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Cmp {
+    Gt,
+    Ge,
+    Lt,
+    Le,
+    Eq,
+}
+
+impl Cmp {
+    fn test<T: PartialOrd>(self, a: T, b: T) -> bool {
+        match self {
+            Cmp::Gt => a > b,
+            Cmp::Ge => a >= b,
+            Cmp::Lt => a < b,
+            Cmp::Le => a <= b,
+            Cmp::Eq => a == b,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+enum Filter {
+    Size(Cmp, u64),
+    /// Age of the modification time in seconds (`:age<7d` = modified within the last 7 days).
+    Age(Cmp, u64),
+    /// Absolute modification date (start of day).
+    Date(Cmp, SystemTime),
+    /// Kinds: group names (img, video, ...), `dir`, `file` or plain extensions.
+    Kind(Vec<String>),
+}
+
+const GROUPS: &[(&str, &[&str])] = &[
+    ("img", &["png", "jpg", "jpeg", "gif", "bmp", "webp", "ico", "svg", "tif", "tiff", "heic"]),
+    ("video", &["mp4", "mkv", "avi", "mov", "wmv", "webm", "flv", "m4v"]),
+    ("audio", &["mp3", "wav", "flac", "ogg", "m4a", "aac", "wma"]),
+    ("doc", &["pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "txt", "md", "rtf", "csv"]),
+    ("archive", &["zip", "rar", "7z", "tar", "gz", "bz2", "xz", "jar"]),
+    ("code", &["rs", "py", "js", "ts", "tsx", "jsx", "java", "c", "cpp", "h", "hpp", "cs", "go", "rb", "php", "sh", "ps1", "json", "toml", "yaml", "yml", "xml", "html", "css", "sql"]),
+];
+
+fn parse_op(s: &str) -> Option<(Cmp, &str)> {
+    for (p, c) in [(">=", Cmp::Ge), ("<=", Cmp::Le), (">", Cmp::Gt), ("<", Cmp::Lt), ("=", Cmp::Eq), (":", Cmp::Eq)] {
+        if let Some(r) = s.strip_prefix(p) {
+            return Some((c, r));
+        }
+    }
+    None
+}
+
+fn parse_size(v: &str) -> Option<u64> {
+    let v = v.trim().to_lowercase();
+    let i = v.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(v.len());
+    let n: f64 = v[..i].parse().ok()?;
+    let mul: f64 = match v[i..].trim() {
+        "" | "b" => 1.0,
+        "k" | "kb" | "kib" => 1024.0,
+        "m" | "mb" | "mib" => 1024.0 * 1024.0,
+        "g" | "gb" | "gib" => 1024.0 * 1024.0 * 1024.0,
+        "t" | "tb" | "tib" => 1024.0_f64.powi(4),
+        _ => return None,
+    };
+    Some((n * mul) as u64)
+}
+
+fn parse_age(v: &str) -> Option<u64> {
+    let v = v.trim().to_lowercase();
+    let i = v.find(|c: char| !(c.is_ascii_digit() || c == '.'))?;
+    let n: f64 = v[..i].parse().ok()?;
+    let unit: f64 = match &v[i..] {
+        "min" => 60.0,
+        "h" => 3600.0,
+        "d" => 86400.0,
+        "w" => 7.0 * 86400.0,
+        "mo" => 30.0 * 86400.0,
+        "y" => 365.0 * 86400.0,
+        _ => return None,
+    };
+    Some((n * unit) as u64)
+}
+
+fn parse_date(v: &str) -> Option<SystemTime> {
+    use chrono::TimeZone;
+    let d = chrono::NaiveDate::parse_from_str(v.trim(), "%Y-%m-%d").ok()?;
+    chrono::Local.from_local_datetime(&d.and_hms_opt(0, 0, 0)?).single().map(SystemTime::from)
+}
+
+/// `Ok(None)` = not a filter token (plain text); `Err` = looks like one but is malformed.
+fn parse_filter(tok: &str) -> Result<Option<Filter>, String> {
+    let Some(body) = tok.strip_prefix(':') else { return Ok(None) };
+    let key_end = body.find(|c: char| !c.is_ascii_alphabetic()).unwrap_or(body.len());
+    let (key, rest) = body.split_at(key_end);
+    let key = key.to_lowercase();
+    if !matches!(key.as_str(), "size" | "age" | "modified" | "mod" | "date" | "type" | "ext") {
+        return Ok(None);
+    }
+    let bad = || format!("bad filter {tok}");
+    let (cmp, val) = parse_op(rest).ok_or_else(bad)?;
+    if val.is_empty() {
+        return Err(bad());
+    }
+    match key.as_str() {
+        "size" => parse_size(val).map(|n| Some(Filter::Size(cmp, n))).ok_or_else(bad),
+        "age" => parse_age(val).map(|n| Some(Filter::Age(cmp, n))).ok_or_else(bad),
+        "modified" | "mod" | "date" => {
+            if let Some(n) = parse_age(val) {
+                Ok(Some(Filter::Age(cmp, n)))
+            } else {
+                parse_date(val).map(|d| Some(Filter::Date(cmp, d))).ok_or_else(bad)
+            }
+        }
+        _ => Ok(Some(Filter::Kind(
+            val.to_lowercase().split(',').map(|s| s.trim().trim_start_matches('.').to_string()).filter(|s| !s.is_empty()).collect(),
+        ))),
+    }
+}
+
+impl Filter {
+    fn test(&self, e: &Entry) -> bool {
+        match self {
+            Filter::Size(c, n) => !e.is_dir && c.test(e.size, *n),
+            Filter::Age(c, secs) => e
+                .modified
+                .is_some_and(|m| c.test(SystemTime::now().duration_since(m).unwrap_or(Duration::ZERO).as_secs(), *secs)),
+            Filter::Date(c, d) => e.modified.is_some_and(|m| {
+                if *c == Cmp::Eq {
+                    m >= *d && m < *d + Duration::from_secs(86400)
+                } else {
+                    c.test(m, *d)
+                }
+            }),
+            Filter::Kind(kinds) => kinds.iter().any(|k| match k.as_str() {
+                "dir" | "folder" => e.is_dir,
+                "file" => !e.is_dir,
+                _ => !e.is_dir && (GROUPS.iter().any(|(g, exts)| g == k && exts.contains(&e.ext.as_str())) || e.ext == *k),
+            }),
+        }
+    }
+}
+
+/// Compiles a query: `:size>10mb`, `:age<7d`, `:type=img` tokens are filters on the
+/// item's metadata, everything else is matched against the name by the chosen mode.
 pub fn compile(query: &str, opts: SearchOpts) -> Matcher {
+    let mut filters = vec![];
+    let mut rest: Vec<&str> = vec![];
+    for tok in query.split_whitespace() {
+        match parse_filter(tok) {
+            Ok(Some(f)) => filters.push(f),
+            Ok(None) => rest.push(tok),
+            Err(e) => return Matcher { kind: Kind::Bad(e), case: opts.match_case, filters: vec![] },
+        }
+    }
+    let mut m = compile_text(&rest.join(" "), opts);
+    m.filters = filters;
+    m
+}
+
+fn compile_text(query: &str, opts: SearchOpts) -> Matcher {
     let q = query.trim();
     let case = opts.match_case;
     if q.is_empty() {
-        return Matcher { kind: Kind::All, case };
+        return Matcher { kind: Kind::All, case, filters: vec![] };
     }
     let fuzzy = |s: &str| Kind::Fuzzy(s.chars().filter(|c| !c.is_whitespace()).map(|c| fold(c, case)).collect());
     let kind = match opts.mode {
@@ -248,12 +422,22 @@ pub fn compile(query: &str, opts: SearchOpts) -> Matcher {
             }
         }
     };
-    Matcher { kind, case }
+    Matcher { kind, case, filters: vec![] }
 }
 
 impl Matcher {
     pub fn is_all(&self) -> bool {
+        matches!(self.kind, Kind::All) && self.filters.is_empty()
+    }
+
+    /// The name part of the query is empty (only `:filters`, or nothing).
+    pub fn name_all(&self) -> bool {
         matches!(self.kind, Kind::All)
+    }
+
+    /// Metadata filters (`:size>...`, `:age<...`, `:type=...`).
+    pub fn filters_ok(&self, e: &Entry) -> bool {
+        self.filters.iter().all(|f| f.test(e))
     }
 
     /// Set when the pattern is invalid (regex); the list then stays unfiltered.
@@ -320,7 +504,7 @@ mod tests {
     use super::*;
 
     fn m(q: &str, mode: SearchMode) -> Matcher {
-        compile(q, SearchOpts { mode, match_case: false, deep: false })
+        compile(q, SearchOpts { mode, match_case: false, ..Default::default() })
     }
 
     #[test]
@@ -373,7 +557,7 @@ mod tests {
 
     #[test]
     fn case_sensitivity_toggle() {
-        let q = |case| compile("README", SearchOpts { mode: SearchMode::Smart, match_case: case, deep: false });
+        let q = |case| compile("README", SearchOpts { mode: SearchMode::Smart, match_case: case, ..Default::default() });
         assert!(q(false).score("readme.md").is_some());
         assert!(q(true).score("readme.md").is_none());
         assert!(q(true).score("README.md").is_some());
@@ -383,5 +567,57 @@ mod tests {
     fn regex_ranges_are_character_based() {
         let r = m("é+", SearchMode::Regex);
         assert_eq!(r.ranges("aéé.txt"), vec![(1, 3)]);
+    }
+}
+
+#[cfg(test)]
+mod filter_tests {
+    use super::*;
+
+    fn entry(name: &str, size: u64, age_days: u64, dir: bool) -> Entry {
+        Entry {
+            name: name.into(),
+            path: name.into(),
+            is_dir: dir,
+            size,
+            modified: Some(SystemTime::now() - Duration::from_secs(age_days * 86400 + 60)),
+            hidden: false,
+            is_up: false,
+            deep: false,
+            snippet: String::new(),
+            ext: name.rsplit_once('.').map(|x| x.1.to_lowercase()).unwrap_or_default(),
+        }
+    }
+
+    #[test]
+    fn size_age_and_type_filters() {
+        let o = SearchOpts::default();
+        let big = entry("a.mp4", 20 << 20, 30, false);
+        let small = entry("b.png", 100, 1, false);
+        let d = entry("sub", 0, 1, true);
+        let m = compile(":size>10mb", o);
+        assert!(m.filters_ok(&big) && !m.filters_ok(&small) && !m.filters_ok(&d));
+        let m = compile(":age<7d", o);
+        assert!(!m.filters_ok(&big) && m.filters_ok(&small));
+        let m = compile(":modified>7d", o);
+        assert!(m.filters_ok(&big) && !m.filters_ok(&small));
+        let m = compile(":type=img,video", o);
+        assert!(m.filters_ok(&big) && m.filters_ok(&small) && !m.filters_ok(&d));
+        let m = compile(":type:dir", o);
+        assert!(m.filters_ok(&d) && !m.filters_ok(&big));
+        let m = compile(":date>2000-01-01 :size<1kb b", o);
+        assert!(m.filters_ok(&small) && !m.filters_ok(&big));
+        assert_eq!(m.score("b.png"), Some(0));
+        assert_eq!(m.score("zzz"), None);
+    }
+
+    #[test]
+    fn bad_filter_is_an_error_and_unknown_colon_is_text() {
+        let o = SearchOpts::default();
+        assert!(compile(":size>abc", o).error().is_some());
+        assert!(compile(":size", o).error().is_some());
+        let m = compile(":foo", o);
+        assert!(m.error().is_none());
+        assert_eq!(m.score("x:foo.txt"), Some(0));
     }
 }

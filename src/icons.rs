@@ -11,18 +11,27 @@ pub struct Icons {
 impl Icons {
     /// `ext` is the lowercase extension; directories use the key "<dir>".
     pub fn get(&mut self, ctx: &Context, ext: &str, is_dir: bool) -> Option<&TextureHandle> {
-        let key = if is_dir { "<dir>".to_string() } else { ext.to_string() };
+        self.fetch(ctx, ext, is_dir, false)
+    }
+
+    /// 32 px version (grid view).
+    pub fn get_large(&mut self, ctx: &Context, ext: &str, is_dir: bool) -> Option<&TextureHandle> {
+        self.fetch(ctx, ext, is_dir, true)
+    }
+
+    fn fetch(&mut self, ctx: &Context, ext: &str, is_dir: bool, large: bool) -> Option<&TextureHandle> {
+        let key = format!("{}{}", if large { "L:" } else { "" }, if is_dir { "<dir>" } else { ext });
         self.cache
             .entry(key.clone())
             .or_insert_with(|| {
-                load(&key, is_dir).map(|img| ctx.load_texture(format!("icon-{key}"), img, TextureOptions::LINEAR))
+                load(ext, is_dir, large).map(|img| ctx.load_texture(format!("icon-{key}"), img, TextureOptions::LINEAR))
             })
             .as_ref()
     }
 }
 
 #[cfg(windows)]
-fn load(ext: &str, is_dir: bool) -> Option<ColorImage> {
+fn load(ext: &str, is_dir: bool, large: bool) -> Option<ColorImage> {
     use windows::{
         Win32::{
             Graphics::Gdi::*,
@@ -43,7 +52,7 @@ fn load(ext: &str, is_dir: bool) -> Option<ColorImage> {
             attrs,
             Some(&mut info),
             std::mem::size_of::<SHFILEINFOW>() as u32,
-            SHGFI_ICON | SHGFI_SMALLICON | SHGFI_USEFILEATTRIBUTES,
+            SHGFI_ICON | if large { SHGFI_LARGEICON } else { SHGFI_SMALLICON } | SHGFI_USEFILEATTRIBUTES,
         );
         if r == 0 || info.hIcon.is_invalid() {
             return None;
@@ -100,6 +109,6 @@ fn load(ext: &str, is_dir: bool) -> Option<ColorImage> {
 }
 
 #[cfg(not(windows))]
-fn load(_ext: &str, _is_dir: bool) -> Option<ColorImage> {
+fn load(_ext: &str, _is_dir: bool, _large: bool) -> Option<ColorImage> {
     None
 }

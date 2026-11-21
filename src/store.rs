@@ -52,6 +52,46 @@ impl ThemeChoice {
     }
 }
 
+#[derive(Serialize, Deserialize, Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ViewMode {
+    #[default]
+    Details,
+    Compact,
+    Grid,
+}
+
+impl ViewMode {
+    pub fn next(self) -> Self {
+        match self {
+            ViewMode::Details => ViewMode::Compact,
+            ViewMode::Compact => ViewMode::Grid,
+            ViewMode::Grid => ViewMode::Details,
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            ViewMode::Details => "Details",
+            ViewMode::Compact => "Compact",
+            ViewMode::Grid => "Grid (thumbnails)",
+        }
+    }
+}
+
+/// Which detail columns are shown (the name column is always there).
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(default)]
+pub struct Cols {
+    pub ext: bool,
+    pub size: bool,
+    pub date: bool,
+}
+
+impl Default for Cols {
+    fn default() -> Self {
+        Cols { ext: false, size: true, date: true }
+    }
+}
+
 /// Remembered window placement (outer position, inner size).
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
 pub struct WinGeom {
@@ -88,6 +128,10 @@ impl WinGeom {
 
 #[derive(Serialize, Deserialize, Default)]
 pub struct Store {
+    #[serde(default)]
+    pub view: ViewMode,
+    #[serde(default)]
+    pub cols: Cols,
     #[serde(default)]
     pub window: Option<WinGeom>,
     #[serde(default)]

@@ -14,6 +14,7 @@ mod preview;
 mod search;
 mod single;
 mod store;
+mod thumbs;
 
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().skip(1).collect();

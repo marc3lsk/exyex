@@ -82,22 +82,24 @@ fn load_svg(path: &Path) -> PvData {
         Err(e) => return PvData::Note(e.to_string()),
     };
     let source = String::from_utf8_lossy(&data).replace('\t', "    ");
+    match render_svg(&data, 1200.0) {
+        Ok((img, size)) => PvData::Svg { img, size, source },
+        Err(e) => PvData::Text { text: source, truncated: false }.with_note(format!("Can't render SVG: {e}")),
+    }
+}
+
+/// Renders SVG data so that its longer side is `target` pixels; also returns the nominal size.
+pub fn render_svg(data: &[u8], target: f32) -> Result<(ColorImage, [u32; 2]), String> {
     let mut opt = resvg::usvg::Options::default();
     opt.fontdb_mut().load_system_fonts();
-    let tree = match resvg::usvg::Tree::from_data(&data, &opt) {
-        Ok(t) => t,
-        Err(e) => return PvData::Text { text: source, truncated: false }.with_note(format!("Can't render SVG: {e}")),
-    };
+    let tree = resvg::usvg::Tree::from_data(data, &opt).map_err(|e| e.to_string())?;
     let sz = tree.size();
     let (w, h) = (sz.width().max(1.0), sz.height().max(1.0));
-    let scale = (1200.0 / w.max(h)).clamp(0.01, 8.0);
+    let scale = (target / w.max(h)).clamp(0.01, 8.0);
     let (pw, ph) = ((w * scale).ceil().max(1.0) as u32, (h * scale).ceil().max(1.0) as u32);
-    let Some(mut pix) = resvg::tiny_skia::Pixmap::new(pw, ph) else {
-        return PvData::Note("SVG has an invalid size".into());
-    };
+    let mut pix = resvg::tiny_skia::Pixmap::new(pw, ph).ok_or("SVG has an invalid size")?;
     resvg::render(&tree, resvg::tiny_skia::Transform::from_scale(scale, scale), &mut pix.as_mut());
-    let img = ColorImage::from_rgba_premultiplied([pw as usize, ph as usize], pix.data());
-    PvData::Svg { img, size: [w.round() as u32, h.round() as u32], source }
+    Ok((ColorImage::from_rgba_premultiplied([pw as usize, ph as usize], pix.data()), [w.round() as u32, h.round() as u32]))
 }
 
 impl PvData {

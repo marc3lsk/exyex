@@ -31,6 +31,8 @@ pub struct Entry {
     pub is_up: bool,
     /// A result of the subfolder search (`name` is then the relative path).
     pub deep: bool,
+    /// Content search: first matching line ("12: text") and match count.
+    pub snippet: String,
     pub ext: String,
 }
 
@@ -71,6 +73,7 @@ pub fn read_dir(p: &Path) -> std::io::Result<Vec<Entry>> {
             hidden,
             is_up: false,
             deep: false,
+            snippet: String::new(),
             ext,
         });
     }
@@ -89,6 +92,7 @@ pub fn with_up(mut v: Vec<Entry>, path: &Path) -> Vec<Entry> {
             hidden: false,
             is_up: true,
             deep: false,
+            snippet: String::new(),
             ext: String::new(),
         });
     }
@@ -246,6 +250,10 @@ pub struct Tab {
     pub last_poll: std::time::Instant,
     /// A navigation that is still reading its folder on a background thread.
     pub loading: Option<Loading>,
+    /// Height of one list row (or grid cell); set by the UI from the view mode.
+    pub row_h: f32,
+    /// Number of columns in grid view (0 = list view).
+    pub grid_cols: usize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -300,6 +308,8 @@ impl Tab {
             mtime: None,
             last_poll: std::time::Instant::now(),
             loading: None,
+            row_h: ROW_H,
+            grid_cols: 0,
         };
         t.reload(None);
         t
@@ -360,10 +370,18 @@ impl Tab {
         self.matcher = compile(&self.filter, self.search);
         self.sync_deep();
         let deep = self.deep_active();
-        let ranked = self.matcher.ranked();
+        let content = deep && self.search.content;
+        let ranked = self.matcher.ranked() && !content;
         let mut scored: Vec<(i32, usize)> = (0..self.entries.len())
             .filter(|&i| !self.entries[i].is_up && self.entries[i].deep == deep && (self.show_hidden || !self.entries[i].hidden))
-            .filter_map(|i| self.matcher.score(&self.entries[i].name).map(|sc| (sc, i)))
+            .filter(|&i| self.matcher.filters_ok(&self.entries[i]))
+            .filter_map(|i| {
+                let e = &self.entries[i];
+                if content && e.deep {
+                    return Some((0, i)); // the walker already matched the file contents
+                }
+                self.matcher.score(&e.name).map(|sc| (sc, i))
+            })
             .collect();
         let entries = &self.entries;
         if ranked {
@@ -408,7 +426,7 @@ impl Tab {
 
     /// Subfolder search is on and there is something to look for.
     pub fn deep_active(&self) -> bool {
-        self.search.deep && !self.filter.is_empty()
+        (self.search.deep || self.search.content) && !self.filter.is_empty()
     }
 
     /// (running, truncated) while a subfolder search is active.
@@ -476,8 +494,9 @@ impl Tab {
     }
 
     pub fn ensure_visible(&mut self) {
-        let top = self.cursor as f32 * ROW_H;
-        let bot = top + ROW_H;
+        let line = if self.grid_cols > 0 { self.cursor / self.grid_cols } else { self.cursor };
+        let top = line as f32 * self.row_h;
+        let bot = top + self.row_h;
         if top < self.scroll_y {
             self.want_scroll = Some(top);
         } else if self.view_h > 0.0 && bot > self.scroll_y + self.view_h {
