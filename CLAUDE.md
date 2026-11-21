@@ -18,6 +18,7 @@ to change the code safely. The user writes Slovak; answer in Slovak, keep code/c
 | `model.rs` | `Entry`, `Tab` (entries/view/cursor/selection/history/sort/filter), `rebuild_view`, path helpers |
 | `search.rs` | in-folder search: `SearchMode` (Smart/Fuzzy/Wildcard/Regex), `compile -> Matcher` (score/ranges), `glob_match` |
 | `archive.rs` | read-only zip/jar as folders: virtual paths (zip file path + inner path) (`split`, `list`, `extract`); hooked into `model::read_dir` and `ops` |
+| `sftp.rs` | SFTP via `russh` + `russh-sftp` (pure Rust, `ring`; blocking API over a private tokio runtime) + Pageant agent auth; virtual paths `sftp:\user@host[:port]\~\dir`; connection pool, TOFU host keys, list/transfer/remove |
 | `thumbs.rs` | async image thumbnails for the grid view (texture cache) |
 | `preview.rs` | Quick Look panel (F3): background loader + UI |
 | `deep.rs` | "Subfolders" search: background BFS walker streaming `DeepMsg::Batch` |
@@ -57,6 +58,12 @@ to change the code safely. The user writes Slovak; answer in Slovak, keep code/c
   `Entry.snippet`; `rebuild_view` accepts deep entries without re-matching their names in content mode.
 - **Views:** `Store.view` (`ViewMode`) and `Store.cols`; `Tab.row_h` / `Tab.grid_cols` are set by `ui_pane` each frame
   and used by `ensure_visible` and keyboard paging. `item_interact` is shared by rows and grid cells.
+- **SFTP aliases:** `Store.aliases` (`user@host:port` → name) is mirrored into `sftp::ALIASES` (`set_aliases`); resolved in
+  `sftp::from_url`, shown via `sftp::title/pretty`. `App::set_alias` saves immediately.
+- **SFTP:** a path is remote when `sftp::is_remote` (prefix `sftp:`). `model::read_dir` dispatches to `sftp::list`
+  (so async loading, search, preview all work); `ops` handles download/upload/remote delete; `App` branches for rename,
+  create, open (temp download), delete (always permanent). Never touch the network from per-keystroke UI code (the
+  path-bar suggestions skip remote dirs). Live-verified (read-only) against OpenSSH 10.2: handshake, Pageant auth, listing, download. Upload/delete/rename were not run on a real server. Do NOT switch back to `ssh2`/libssh2-WinCNG: it lacks curve25519/ecdh and fails key exchange with modern OpenSSH (`Session(-5)`).
 - **Compare:** `App.compare` + `diff` (name → `Diff`) recomputed each tick; rows draw a colored stripe.
 - **Window geometry** is saved in `Store.window` / `jobs_win` (`WinGeom`, validated against the virtual screen).
 - **Operations window** is a separate OS window (`show_viewport_immediate`), not an in-app panel.

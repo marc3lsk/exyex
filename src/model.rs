@@ -37,6 +37,9 @@ pub struct Entry {
 }
 
 pub fn read_dir(p: &Path) -> std::io::Result<Vec<Entry>> {
+    if crate::sftp::is_remote(p) {
+        return crate::sftp::list(p);
+    }
     if let Some((zip, inner)) = crate::archive::split(p) {
         return crate::archive::list(&zip, &inner);
     }
@@ -82,6 +85,9 @@ pub fn read_dir(p: &Path) -> std::io::Result<Vec<Entry>> {
 
 /// Appends the virtual ".." entry (if the folder has a parent).
 pub fn with_up(mut v: Vec<Entry>, path: &Path) -> Vec<Entry> {
+    if crate::sftp::is_root(path) {
+        return v; // the list of connections has no parent
+    }
     if let Some(parent) = path.parent() {
         v.push(Entry {
             name: "..".into(),
@@ -97,6 +103,11 @@ pub fn with_up(mut v: Vec<Entry>, path: &Path) -> Vec<Entry> {
         });
     }
     v
+}
+
+/// A folder we can navigate to. Remote folders are not probed here (that would connect).
+pub fn is_dir_path(p: &Path) -> bool {
+    crate::sftp::is_remote(p) || p.is_dir()
 }
 
 pub fn dir_mtime(p: &Path) -> Option<SystemTime> {
@@ -197,6 +208,12 @@ pub fn parse_user_path(input: &str, base: &Path) -> Option<PathBuf> {
     }
     if let Some(r) = s.strip_prefix("file:///") {
         s = r.replace("%20", " ");
+    }
+    if let Some(p) = crate::sftp::from_url(&s) {
+        return Some(p);
+    }
+    if crate::sftp::is_remote(Path::new(&s)) {
+        return Some(lexical_normalize(Path::new(&s.replace('/', "\\"))));
     }
     s = expand_env(&s);
     if s == "~" || s.starts_with("~/") || s.starts_with("~\\") {
@@ -316,7 +333,7 @@ impl Tab {
     }
 
     pub fn title(&self) -> String {
-        display_name(&self.path)
+        crate::sftp::title(&self.path).unwrap_or_else(|| display_name(&self.path))
     }
 
     pub fn has_up(&self) -> bool {
@@ -619,6 +636,9 @@ impl Tab {
     }
 
     pub fn up(&mut self) -> Result<(), String> {
+        if crate::sftp::is_root(&self.path) {
+            return Ok(());
+        }
         match self.path.parent().map(Path::to_path_buf) {
             Some(p) => self.go(p),
             None => Ok(()),

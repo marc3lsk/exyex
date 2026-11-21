@@ -167,6 +167,9 @@ fn run(
     match kind {
         OpKind::Trash => {
             let _ = tx.send(Msg::Progress { done: 0, total: 1, current: format!("{} item(s)", srcs.len()) });
+            if srcs.iter().any(|s| crate::sftp::is_remote(s)) {
+                return Err("Remote files can't go to the Recycle Bin – use permanent delete".into());
+            }
             trash::delete_all(srcs).map_err(|e| e.to_string())?;
         }
         OpKind::Delete => {
@@ -175,10 +178,14 @@ fn run(
                 if cancel.load(Ordering::Relaxed) {
                     return Err("Cancelled".into());
                 }
-                let r = match fs::symlink_metadata(s) {
-                    Ok(m) if m.is_dir() => fs::remove_dir_all(s),
-                    Ok(_) => fs::remove_file(s),
-                    Err(e) => Err(e),
+                let r = if crate::sftp::is_remote(s) {
+                    crate::sftp::remove_all(s)
+                } else {
+                    match fs::symlink_metadata(s) {
+                        Ok(m) if m.is_dir() => fs::remove_dir_all(s),
+                        Ok(_) => fs::remove_file(s),
+                        Err(e) => Err(e),
+                    }
                 };
                 if let Err(e) = r {
                     errors.push(format!("{}: {}", s.display(), e));
@@ -188,9 +195,14 @@ fn run(
         }
         OpKind::Copy | OpKind::Move => {
             let dest = dest.ok_or("no destination")?;
-            let src_size = |s: &PathBuf| match crate::archive::split_inner(s) {
-                Some((z, i)) => crate::archive::size(&z, &i),
-                None => tree_size(s),
+            let src_size = |s: &PathBuf| {
+                if crate::sftp::is_remote(s) {
+                    return crate::sftp::size_of(s);
+                }
+                match crate::archive::split_inner(s) {
+                    Some((z, i)) => crate::archive::size(&z, &i),
+                    None => tree_size(s),
+                }
             };
             let mut pr = Progress { tx, ctx, done: 0, total: srcs.iter().map(src_size).sum(), last: Instant::now() };
             for s in srcs {
@@ -198,6 +210,32 @@ fn run(
                     return Err("Cancelled".into());
                 }
                 let Some(name) = s.file_name() else { continue };
+                let (rs, rd) = (crate::sftp::is_remote(s), crate::sftp::is_remote(dest));
+                if rs || rd {
+                    if rs && rd {
+                        errors.push(format!("{}: copying between two servers is not supported (copy to a local folder first)", s.display()));
+                        continue;
+                    }
+                    let mut sink = |n: u64| pr.advance(n, s);
+                    let r = if rs {
+                        let target = unique_dest(dest, name);
+                        crate::sftp::download(s, &target, cancel, &mut sink).and_then(|_| {
+                            if kind == OpKind::Move { crate::sftp::remove_all(s).map_err(|e| format!("copied, but could not remove source: {e}")) } else { Ok(()) }
+                        })
+                    } else {
+                        let target = crate::sftp::unique_remote(dest, name);
+                        crate::sftp::upload(s, &target, cancel, &mut sink).and_then(|_| {
+                            if kind == OpKind::Move { remove_any(s).map_err(|e| format!("copied, but could not remove source: {e}")) } else { Ok(()) }
+                        })
+                    };
+                    if let Err(e) = r {
+                        if e == "Cancelled" {
+                            return Err(e);
+                        }
+                        errors.push(format!("{}: {}", s.display(), e));
+                    }
+                    continue;
+                }
                 if let Some((zip, inner)) = crate::archive::split_inner(s) {
                     // copying out of an archive = extracting
                     if kind == OpKind::Move {

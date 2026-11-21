@@ -56,6 +56,7 @@ impl Pane {
 enum Dialog {
     NewFolder { text: String, fresh: bool },
     NewFile { text: String, fresh: bool },
+    SftpAlias { key: String, text: String, fresh: bool },
     Delete { paths: Vec<PathBuf>, permanent: bool },
     /// F5 / F6: confirm copying or moving the selection to the other pane.
     Transfer { kind: OpKind, paths: Vec<PathBuf>, dest: PathBuf },
@@ -157,6 +158,8 @@ pub struct App {
     tab_drag: Option<(usize, usize)>,
     tab_rects: [Vec<Rect>; 2],
     thumbs: crate::thumbs::Thumbs,
+    sftp_open_tx: std::sync::mpsc::Sender<Result<PathBuf, String>>,
+    sftp_open_rx: std::sync::mpsc::Receiver<Result<PathBuf, String>>,
     preview: bool,
     pv: crate::preview::Previewer,
     compare: bool,
@@ -284,6 +287,7 @@ impl App {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("C:\\"));
         let alt = dirs::download_dir().or_else(dirs::document_dir).unwrap_or_else(|| home.clone());
         let show_hidden = store.show_hidden;
+        crate::sftp::set_aliases(store.aliases.clone());
 
         let make = |idx: usize, default: &Path| -> Pane {
             let mut tabs: Vec<Tab> = vec![];
@@ -291,7 +295,7 @@ impl App {
             if let Some(ps) = store.panes.get(idx) {
                 for ts in &ps.tabs {
                     let p = PathBuf::from(&ts.path);
-                    if p.is_dir() {
+                    if !crate::sftp::is_remote(&p) && p.is_dir() {
                         let mut t = Tab::new(p, show_hidden);
                         t.search = store.search;
                         t.exclude = store.exclude.clone();
@@ -312,6 +316,7 @@ impl App {
             Pane { tabs, active, path_edit: None, focus_filter: false, rect: Rect::NOTHING, seen_tabs: (usize::MAX, 0) }
         };
 
+        let (sftp_open_tx, sftp_open_rx) = std::sync::mpsc::channel();
         let mut app = App {
             panes: [make(0, &home), make(1, &alt)],
             active: store.active_pane.min(1),
@@ -333,6 +338,8 @@ impl App {
             tab_drag: None,
             tab_rects: [vec![], vec![]],
             thumbs: Default::default(),
+            sftp_open_tx,
+            sftp_open_rx,
             preview: false,
             pv: Default::default(),
             compare: false,
@@ -643,6 +650,18 @@ impl App {
         self.sync_watches();
         self.apply_fs_events(ctx);
         self.refresh_diff();
+        while let Ok(r) = self.sftp_open_rx.try_recv() {
+            match r {
+                Ok(tmp) => {
+                    if let Err(e) = open::that_detached(&tmp) {
+                        self.say(format!("⚠ Could not open {}: {e}", tmp.display()));
+                    } else {
+                        self.say(format!("Opened {} (a temporary copy – edits are not uploaded)", tmp.display()));
+                    }
+                }
+                Err(e) => self.say(e),
+            }
+        }
         if self.thumbs.poll(ctx) {
             ctx.request_repaint_after(Duration::from_millis(40));
         }
@@ -834,6 +853,14 @@ impl App {
                 let Some(e) = self.tab().current().cloned() else { return };
                 if e.is_dir {
                     self.navigate(pi, e.path);
+                } else if crate::sftp::is_remote(&e.path) {
+                    let (path, name, c2) = (e.path.clone(), e.name.clone(), ctx.clone());
+                    let tx = self.sftp_open_tx.clone();
+                    self.say(format!("Downloading {name}…"));
+                    std::thread::spawn(move || {
+                        let _ = tx.send(crate::sftp::fetch_temp(&path).map_err(|e| format!("⚠ {name}: {e}")));
+                        c2.request_repaint();
+                    });
                 } else if crate::archive::is_archive_name(&e.path) && crate::archive::split_inner(&e.path).is_none() {
                     self.navigate(pi, e.path); // browse the archive like a folder
                 } else if let Some((zip, inner)) = crate::archive::split_inner(&e.path) {
@@ -860,6 +887,30 @@ impl App {
                     }
                     Err(err) => self.say(err),
                 }
+            }
+            FavoriteItem => {
+                let p = self.tab().current().filter(|e| e.is_dir && !e.is_up).map(|e| e.path.clone()).unwrap_or_else(|| self.tab().path.clone());
+                let on = self.store.toggle_favorite(&p);
+                self.dirty = true;
+                self.say(if on { format!("Added {} to favorites ★", crate::sftp::pretty(&p).unwrap_or_else(|| display_name(&p))) } else { "Removed from favorites".to_string() });
+            }
+            SftpAlias => {
+                let t = self.tab();
+                let p = t.current().filter(|e| !e.is_up).map(|e| e.path.clone()).filter(|p| crate::sftp::is_remote(p)).unwrap_or_else(|| t.path.clone());
+                match crate::sftp::conn_key(&p) {
+                    Some(key) => {
+                        let text = self.store.aliases.get(&key).cloned().unwrap_or_default();
+                        self.dialog = Some(Dialog::SftpAlias { key, text, fresh: true });
+                    }
+                    None => self.say("Open an SFTP folder (or select a connection in sftp:) first"),
+                }
+            }
+            ConnectSftp => {
+                self.panes[pi].path_edit = Some(PathEdit { orig: String::new(), text: "sftp://".into(), fresh: true, sugg_for: String::from("\u{1}"), sugg: vec![], sel: None, popup_rect: Rect::NOTHING });
+                self.say("Type sftp://user@host[:port]/path – keys come from Pageant");
+            }
+            SftpRoot => {
+                self.navigate(pi, PathBuf::from("sftp:"));
             }
             QuickLook => self.preview = !self.preview,
             ViewCycle | ViewDetails | ViewCompact | ViewGrid => {
@@ -898,7 +949,8 @@ impl App {
                 }
             }
             Root => {
-                if let Some(root) = self.tab().path.ancestors().last().map(PathBuf::from) {
+                let root = crate::sftp::root_of(&self.tab().path).or_else(|| self.tab().path.ancestors().last().map(PathBuf::from));
+                if let Some(root) = root {
                     if root != self.tab().path {
                         self.navigate(pi, root);
                     }
@@ -934,7 +986,8 @@ impl App {
             Delete | DeletePermanent => {
                 let paths = self.tab().targets();
                 if !paths.is_empty() {
-                    self.dialog = Some(Dialog::Delete { paths, permanent: a == DeletePermanent });
+                    let permanent = a == DeletePermanent || paths.iter().any(|p| crate::sftp::is_remote(p));
+                    self.dialog = Some(Dialog::Delete { paths, permanent });
                 }
             }
             Rename => self.start_inline(pi),
@@ -1121,10 +1174,13 @@ impl App {
             Ok(()) => {}
         }
         let target = path.with_file_name(new_name);
-        if target != path && target.exists() && !target.to_string_lossy().eq_ignore_ascii_case(&path.to_string_lossy()) {
+        let remote = crate::sftp::is_remote(path);
+        let exists = if remote { crate::sftp::exists(&target) } else { target.exists() };
+        if target != path && exists && !target.to_string_lossy().eq_ignore_ascii_case(&path.to_string_lossy()) {
             return self.say(format!("⚠ \"{new_name}\" already exists"));
         }
-        match std::fs::rename(path, &target) {
+        let renamed = if remote { crate::sftp::rename(path, &target) } else { std::fs::rename(path, &target) };
+        match renamed {
             Ok(()) => {
                 self.say(format!("Renamed to {new_name}"));
                 for p in &mut self.panes {
@@ -1137,12 +1193,38 @@ impl App {
         }
     }
 
+    /// Sets (or, when empty, removes) the alias of an SFTP connection.
+    fn set_alias(&mut self, key: &str, alias: &str) {
+        if alias.is_empty() {
+            self.store.aliases.remove(key);
+            self.say("Alias removed");
+        } else {
+            if alias.contains(['@', '/', '\\', ':', ' ']) {
+                return self.say("⚠ An alias can't contain spaces or @ / \\ :");
+            }
+            if self.store.aliases.iter().any(|(k, a)| k != key && a.eq_ignore_ascii_case(alias)) {
+                return self.say(format!("⚠ Alias \"{alias}\" is already used by another connection"));
+            }
+            self.store.aliases.insert(key.to_string(), alias.to_string());
+            self.say(format!("{key} is now \"{alias}\" – try sftp://{alias}/"));
+        }
+        crate::sftp::set_aliases(self.store.aliases.clone());
+        self.store.save();
+        self.reload_all();
+    }
+
     fn do_create(&mut self, name: &str, folder: bool) {
         if let Err(e) = validate_name(name) {
             return self.say(format!("⚠ {e}"));
         }
         let target = self.tab().path.join(name);
-        let r = if folder { std::fs::create_dir(&target) } else { std::fs::File::create_new(&target).map(|_| ()) };
+        let r = if crate::sftp::is_remote(&target) {
+            if folder { crate::sftp::mkdir(&target) } else { crate::sftp::create_file(&target) }
+        } else if folder {
+            std::fs::create_dir(&target)
+        } else {
+            std::fs::File::create_new(&target).map(|_| ())
+        };
         match r {
             Ok(()) => {
                 self.say(format!("Created {name}"));
@@ -1305,7 +1387,7 @@ impl App {
             add(d.clone(), "drive", 100, &mut folders);
         }
         for (p, score) in self.store.frecent().into_iter().take(150) {
-            if p.is_dir() {
+            if crate::model::is_dir_path(&p) {
                 add(p, "frequent", (score as i32).min(250), &mut folders);
             }
         }
@@ -1352,7 +1434,7 @@ impl App {
             Item::Action(a) => self.run(ctx, *a),
             Item::Folder(p, _) | Item::Goto(p) => {
                 let p = p.clone();
-                if !p.is_dir() {
+                if !crate::model::is_dir_path(&p) {
                     // Goto of a file: open its folder and focus the file.
                     if let (Some(parent), Some(name)) = (p.parent(), p.file_name()) {
                         let pi = self.active;
@@ -1502,6 +1584,7 @@ impl App {
         let title = match &dlg {
             Dialog::NewFolder { .. } => "New folder",
             Dialog::NewFile { .. } => "New file",
+            Dialog::SftpAlias { .. } => "SFTP alias",
             Dialog::Delete { permanent: true, .. } => "Delete permanently",
             Dialog::Delete { .. } => "Delete",
             Dialog::Transfer { kind: OpKind::Move, .. } => "Move",
@@ -1515,6 +1598,11 @@ impl App {
                 ui.set_min_width(420.0);
                 match &mut dlg {
                     Dialog::NewFolder { text, fresh } => text_field(ui, text, fresh, None),
+                    Dialog::SftpAlias { key, text, fresh } => {
+                        ui.label(format!("Alias for {key}"));
+                        ui.weak("Use it like sftp://alias/path . Leave empty to remove the alias.");
+                        text_field(ui, text, fresh, None)
+                    }
                     Dialog::NewFile { text, fresh } => {
                         let n = stem_len(text);
                         text_field(ui, text, fresh, Some(n))
@@ -1580,6 +1668,7 @@ impl App {
             match dlg {
                 Dialog::NewFolder { text, .. } => self.do_create(text.trim(), true),
                 Dialog::NewFile { text, .. } => self.do_create(text.trim(), false),
+                Dialog::SftpAlias { key, text, .. } => self.set_alias(&key, text.trim()),
                 Dialog::Transfer { kind, paths, dest } => {
                     let ctx = ctx.clone();
                     self.start_op(&ctx, kind, paths, Some(dest));
@@ -2109,7 +2198,7 @@ Search inside the files, in all subfolders.\nShows the first matching line. Bina
                         // thumbnail (images) or a large shell icon
                         let area = Rect::from_min_size(rect.min + vec2(4.0, 4.0), vec2(rect.width() - 8.0, 74.0));
                         let mut drawn = false;
-                        if !e.is_dir && !e.is_up && crate::thumbs::is_thumbnailable(&e.ext, e.size) {
+                        if !e.is_dir && !e.is_up && !crate::sftp::is_remote(&e.path) && crate::thumbs::is_thumbnailable(&e.ext, e.size) {
                             if let Some(t) = thumbs.get(&ctx, &e.path) {
                                 let sz = t.size_vec2();
                                 let k = (area.width() / sz.x).min(area.height() / sz.y).min(1.0);
@@ -2433,6 +2522,14 @@ fn item_interact(ui: &mut Ui, resp: &egui::Response, pi: usize, vi: usize, e: &E
                 ui.close();
             }
         }
+        if e.is_dir && !e.is_up && ui.button("Add / remove favorite ★").clicked() {
+            evs.push(Ev::Run(Action::FavoriteItem));
+            ui.close();
+        }
+        if crate::sftp::is_remote(&e.path) && ui.button("SFTP alias…").clicked() {
+            evs.push(Ev::Run(Action::SftpAlias));
+            ui.close();
+        }
     });
 }
 
@@ -2648,18 +2745,19 @@ fn suggestions(text: &str, orig: &str, base: &Path, store: &Store) -> Vec<Sugg> 
         }
     };
     let q = if text == orig { "" } else { text.trim() };
+    let fq = q.replace('/', "\\"); // recents of remote folders use backslashes internally
 
     // Just opened (text untouched): favorites, then most frecent folders.
     if q.is_empty() {
         let mut out = vec![];
         for f in &store.favorites {
             let p = PathBuf::from(f);
-            if p != base && p.is_dir() {
+            if p != base && crate::model::is_dir_path(&p) {
                 push(&mut out, p, "★ favorite");
             }
         }
         for (p, _) in store.frecent().into_iter().take(40) {
-            if p != base && p.is_dir() {
+            if p != base && crate::model::is_dir_path(&p) {
                 push(&mut out, p, "recent");
             }
         }
@@ -2675,6 +2773,9 @@ fn suggestions(text: &str, orig: &str, base: &Path, store: &Store) -> Vec<Sugg> 
                 None => return vec![],
             }
         };
+        if crate::sftp::is_remote(&dir) {
+            return vec![]; // never hit the network on every keystroke
+        }
         let Ok(rd) = read_dir(&dir) else { return vec![] };
         let l = leaf.to_lowercase();
         let mut v: Vec<(bool, PathBuf, String)> = rd
@@ -2694,20 +2795,21 @@ fn suggestions(text: &str, orig: &str, base: &Path, store: &Store) -> Vec<Sugg> 
     // favorites + recent folders matching anywhere in the path
     let mut ranked: Vec<(i32, PathBuf, &'static str)> = vec![];
     for f in &store.favorites {
-        let best = actions::fuzzy(q, f).into_iter().chain(actions::fuzzy(q, &display_name(Path::new(f))).map(|s| s + 20)).max();
+        let best = actions::fuzzy(&fq, f).into_iter().chain(actions::fuzzy(&fq, &display_name(Path::new(f))).map(|s| s + 20)).max();
         if let Some(s) = best {
             ranked.push((s + 500, PathBuf::from(f), "★ favorite"));
         }
     }
     for (p, score) in store.frecent().into_iter() {
         let full = p.to_string_lossy();
-        let best = actions::fuzzy(q, &full).into_iter().chain(actions::fuzzy(q, &display_name(&p)).map(|s| s + 20)).max();
+        let full = match crate::sftp::pretty(&p) { Some(pr) => format!("{full} {pr}"), None => full.into_owned() };
+        let best = actions::fuzzy(&fq, &full).into_iter().chain(actions::fuzzy(&fq, &display_name(&p)).map(|s| s + 20)).max();
         if let Some(s) = best {
             ranked.push((s + (score as i32).min(100) / 2, p, "recent"));
         }
     }
     ranked.sort_by(|a, b| b.0.cmp(&a.0));
-    let hist: Vec<(PathBuf, &'static str)> = ranked.into_iter().filter(|r| r.1.is_dir()).take(8).map(|r| (r.1, r.2)).collect();
+    let hist: Vec<(PathBuf, &'static str)> = ranked.into_iter().filter(|r| crate::model::is_dir_path(&r.1)).take(8).map(|r| (r.1, r.2)).collect();
 
     let mut out = vec![];
     if pathlike {
@@ -2820,7 +2922,7 @@ fn path_edit_ui(ui: &mut Ui, pe: &mut PathEdit, base: &Path, pi: usize, evs: &mu
                         let (label, right) = if sg.tag.is_empty() {
                             (display_name(&sg.path), "folder")
                         } else {
-                            (sg.path.display().to_string(), sg.tag)
+                            (crate::sftp::pretty(&sg.path).unwrap_or_else(|| sg.path.display().to_string()), sg.tag)
                         };
                         let tc = ui.visuals().text_color();
                         let weak = ui.visuals().weak_text_color();
@@ -3178,7 +3280,7 @@ impl App {
                 self.active = pi;
                 let base = self.panes[pi].tab().path.clone();
                 match parse_user_path(&s, &base) {
-                    Some(p) if p.is_dir() || crate::archive::split(&p).is_some_and(|(z, i)| i.is_empty() || crate::archive::list(&z, &i).is_ok_and(|v| !v.is_empty())) => {
+                    Some(p) if crate::model::is_dir_path(&p) || crate::archive::split(&p).is_some_and(|(z, i)| i.is_empty() || crate::archive::list(&z, &i).is_ok_and(|v| !v.is_empty())) => {
                         self.navigate(pi, p);
                     }
                     Some(p) if p.is_file() => {

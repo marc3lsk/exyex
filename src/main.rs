@@ -12,6 +12,7 @@ mod model;
 mod ops;
 mod preview;
 mod search;
+mod sftp;
 mod single;
 mod store;
 mod thumbs;

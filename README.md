@@ -73,6 +73,27 @@ matching line (`12: text  (+3 more)`). Narrow it with filters, e.g. `TODO :ext=r
 (png/jpg/gif/bmp/webp/ico/svg) and large shell icons; arrow keys move in 2D there. Right-click the column header or the
 view button to choose the columns (Type / Size / Modified). The choice is remembered.
 
+## SFTP (Pageant)
+Browse and transfer files on SSH servers; authentication uses the keys loaded in **Pageant** (no passwords or key files are
+handled by exyex). **Ctrl+Shift+K** (or palette → *Connect to SFTP server*) opens the path bar with `sftp://`; type
+`sftp://user@host[:port]/path` (a bare `sftp://user@host` opens the home folder) and press Enter.
+
+- Remote folders behave like local ones: tabs, history, breadcrumbs, favorites (★), recents, filter/search by name,
+  Quick Look (text, small images), compare panes. The path bar shows them as `sftp:\\user@host\~\dir` (`~` = remote home).
+- **Favorites:** the ☆ chip / `Ctrl+B` favorites the current remote folder; right-click any folder (also a server in the
+  `sftp:` list) → *Add / remove favorite ★*.
+- **Aliases:** right-click → *SFTP alias…* (or palette → *SFTP: set alias for this connection*) gives a server a short name,
+  e.g. `prod`. Then type `sftp://prod/var/www`; the alias is shown in tab titles, the `sftp:` list, favorites and recents
+  (and the path-bar suggestions also match it). An empty alias removes it. Stored in `state.json`.
+- `sftp:` (palette → *SFTP: known connections*, or `..` from a server root) lists servers from your favorites and recents.
+- F5 / F6 / drag / clipboard copy and move between a remote and a local folder (both directions, folders recursively,
+  progress in the operations window, mtime preserved). Remote → remote is not supported (copy through a local folder).
+- New folder / new file / rename / delete work on the server. Delete is always permanent (there is no recycle bin).
+- Enter on a remote file downloads a temporary copy and opens it (changes are **not** uploaded back).
+- The first connection to a host saves its key fingerprint in `%APPDATA%\exyex\known_hosts.json`; a changed key is refused.
+- Not available remotely: content search (name search in subfolders works but is slow), thumbnails; remote tabs are not
+  restored at startup.
+
 ## Quick Look, compare, archives
 - **F3 – Quick Look:** side panel that follows the cursor: text (first 64 KB), images (png/jpg/gif/bmp/webp/ico),
   folder summaries, zip contents, hex head for binary files. Close with the ✕ or F3 again.

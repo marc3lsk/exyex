@@ -28,6 +28,33 @@ pub enum PvData {
 
 /// Blocking loader – runs on a worker thread.
 pub fn load(path: &Path, e: &Entry) -> PvData {
+    if crate::sftp::is_remote(path) {
+        if e.is_dir {
+            return match crate::sftp::list(path) {
+                Ok(v) => folder_summary(&v),
+                Err(err) => PvData::Note(err.to_string()),
+            };
+        }
+        if IMAGE_EXTS.contains(&e.ext.as_str()) && e.size <= 8 * 1024 * 1024 {
+            return match crate::sftp::read_head(path, 8 * 1024 * 1024) {
+                Ok(b) => match image::load_from_memory(&b) {
+                    Ok(img) => {
+                        let (w, h) = (img.width(), img.height());
+                        let img = if w.max(h) > 1600 { img.thumbnail(1600, 1600) } else { img };
+                        let rgba = img.to_rgba8();
+                        let size = [rgba.width() as usize, rgba.height() as usize];
+                        PvData::Image(ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()), [w, h])
+                    }
+                    Err(err) => PvData::Note(format!("Can't decode image: {err}")),
+                },
+                Err(err) => PvData::Note(err.to_string()),
+            };
+        }
+        return match crate::sftp::read_head(path, TEXT_BYTES) {
+            Ok(b) => bytes_preview(&b, e.size),
+            Err(err) => PvData::Note(err.to_string()),
+        };
+    }
     if let Some((zip, inner)) = archive::split(path) {
         if e.is_dir || inner.is_empty() {
             return match archive::list(&zip, &inner) {

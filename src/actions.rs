@@ -50,6 +50,10 @@ pub enum Action {
     ToggleFavorite,
     Reveal,
     ShowInFolder,
+    ConnectSftp,
+    SftpAlias,
+    FavoriteItem,
+    SftpRoot,
     ViewCycle,
     ViewDetails,
     ViewCompact,
@@ -80,7 +84,7 @@ pub const PALETTE_ACTIONS: &[Action] = &[
     FolderJump, Copy, Move, Rename, Delete, DeletePermanent, NewFolder, NewFile, ClipCopy, ClipCut, ClipPaste,
     CopyPath, CopyFolderPath, NewTab, CloseTab, CloseOtherTabs, CloseTabsLeft, CloseTabsRight, ReopenTab, NextTab, PrevTab, SwitchPane, SwapPanes, MirrorToOther, Up, Back,
     Forward, Open, OpenInNewTab, Refresh, EditPath, Filter, SelectAll, SelectNone, InvertSelection, ToggleSelect,
-    ToggleHidden, SortName, SortExt, SortSize, SortDate, ToggleFavorite, Reveal, ShowInFolder, ViewCycle, ViewDetails, ViewCompact, ViewGrid, ColExt, ColSize, ColDate, QuickLook, CompareToggle, SelectDiff, SyncToOther, Root, ExplorerHere, Terminal, PowerShellHere, CmdHere, ThemeCycle, ThemeSystem, ThemeLight, ThemeDark, Quit,
+    ToggleHidden, SortName, SortExt, SortSize, SortDate, ToggleFavorite, Reveal, ShowInFolder, ConnectSftp, SftpAlias, FavoriteItem, SftpRoot, ViewCycle, ViewDetails, ViewCompact, ViewGrid, ColExt, ColSize, ColDate, QuickLook, CompareToggle, SelectDiff, SyncToOther, Root, ExplorerHere, Terminal, PowerShellHere, CmdHere, ThemeCycle, ThemeSystem, ThemeLight, ThemeDark, Quit,
 ];
 
 pub fn name(a: Action) -> &'static str {
@@ -100,6 +104,10 @@ pub fn name(a: Action) -> &'static str {
         PrevTab => "Previous tab",
         Up => "Go to parent folder",
         Root => "Go to root of this drive",
+        ConnectSftp => "Connect to SFTP server (Pageant)…",
+        SftpRoot => "SFTP: known connections",
+        SftpAlias => "SFTP: set alias for this connection…",
+        FavoriteItem => "Add / remove the selected folder to favorites",
         ViewCycle => "View: cycle Details / Compact / Grid",
         ViewDetails => "View: details",
         ViewCompact => "View: compact list",
@@ -203,6 +211,7 @@ pub fn bindings() -> Vec<Binding> {
         b(c, Key::M, CompareToggle),
         b(n, Key::F3, QuickLook),
         b(a, Key::V, ViewCycle),
+        b(cs, Key::K, ConnectSftp),
         b(a, Key::Enter, ShowInFolder),
         b(c, Key::Enter, OpenInNewTab),
         b(c, Key::F3, SortName),

@@ -14,7 +14,7 @@ Legenda: ✅ hotové · 🟡 rozpracované / čiastočné · ⬜ nápad
 - ⬜ **Hromadné premenovanie** – vzor `foto_{n:3}.jpg`, regex náhrada, živý náhľad.
 - ✅ **Porovnanie a synchronizácia panelov** – zvýraznenie rozdielov, výber rozdielov, kopírovanie do druhého panelu.
 - ✅ **Archívy ako priečinky** – zip/jar sa dajú prechádzať, vyhľadávať v nich a kopírovať von (len na čítanie).
-- ⬜ **SFTP / WinSCP** cez Pageant (fázovaný plán: pripojenia → listing → prenosy).
+- ✅ **SFTP cez Pageant** – pripojenie (`sftp://user@host`), listing, kopírovanie / presun / mazanie / premenovanie / nový priečinok, otvorenie súboru. Hotové fázy 1–3; ďalej: editácia na mieste s uploadom, remote → remote, synchronizácia priečinkov, resume prenosov.
 
 ## Hľadanie
 - ✅ Smart / Fuzzy / Wildcard / Regex, hľadanie v podpriečinkoch, manuálny exclude.

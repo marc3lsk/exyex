@@ -128,6 +128,9 @@ impl WinGeom {
 
 #[derive(Serialize, Deserialize, Default)]
 pub struct Store {
+    /// SFTP connection aliases: `user@host:port` -> short name.
+    #[serde(default)]
+    pub aliases: HashMap<String, String>,
     #[serde(default)]
     pub view: ViewMode,
     #[serde(default)]
