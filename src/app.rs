@@ -2,12 +2,13 @@ use crate::{
     actions::{self, Action, Binding, PALETTE_ACTIONS},
     icons::Icons,
     model::*,
-    ops::{self, Job, Msg, OpKind},
+    ops::{self, Job, JobState, Msg, OpKind},
+    search::{SearchMode, SearchOpts},
     store::*,
 };
 use eframe::egui::{self, Align, Align2, Color32, Context, FontId, Key, Layout, Modifiers, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::atomic::Ordering,
     time::{Duration, Instant},
@@ -56,6 +57,8 @@ enum Dialog {
     NewFolder { text: String, fresh: bool },
     NewFile { text: String, fresh: bool },
     Delete { paths: Vec<PathBuf>, permanent: bool },
+    /// F5 / F6: confirm copying or moving the selection to the other pane.
+    Transfer { kind: OpKind, paths: Vec<PathBuf>, dest: PathBuf },
 }
 
 /// In-place rename editor shown inside a file-list row.
@@ -117,6 +120,8 @@ enum Ev {
     Tab(usize, usize),
     CloseTab(usize, usize),
     NewTab(usize),
+    SetSearch(SearchOpts),
+    SetExclude(String),
     TabDrag(usize, usize),
     TabMenu(usize, usize, TabCmd),
     Go(usize, PathBuf),
@@ -134,7 +139,8 @@ pub struct App {
     bindings: Vec<Binding>,
     palette: Option<Palette>,
     dialog: Option<Dialog>,
-    job: Option<Job>,
+    jobs: Vec<Job>,
+    jobs_open: bool,
     clipboard: Option<(Vec<PathBuf>, bool)>,
     drag: Option<Drag>,
     drop_hover: Option<PathBuf>,
@@ -150,6 +156,15 @@ pub struct App {
     tab_drag: Option<(usize, usize)>,
     typeahead: (String, Instant),
     drives: Vec<PathBuf>,
+    /// OS file-system notifications for the folders shown in the active tabs.
+    watcher: Option<notify::RecommendedWatcher>,
+    fs_rx: std::sync::mpsc::Receiver<Vec<PathBuf>>,
+    /// folders successfully watched (key -> path); others fall back to polling
+    watched: HashMap<String, PathBuf>,
+    watch_failed: HashSet<String>,
+    /// folders with pending external changes (key -> first event time)
+    fs_dirty: HashMap<String, Instant>,
+    fs_last: Option<Instant>,
     dirty: bool,
     last_save: Instant,
     last_title: String,
@@ -157,6 +172,11 @@ pub struct App {
 }
 
 // -------------------------------------------------------------------- setup
+
+/// Case-insensitive, separator-normalized key for comparing folder paths.
+fn path_key(p: &Path) -> String {
+    p.to_string_lossy().to_lowercase().trim_start_matches(r"\\?\").trim_end_matches('\\').to_string()
+}
 
 fn list_drives() -> Vec<PathBuf> {
     #[cfg(windows)]
@@ -241,6 +261,17 @@ impl App {
             s.set_ctx(cc.egui_ctx.clone());
         }
         setup_style(&cc.egui_ctx);
+        let (fs_tx, fs_rx) = std::sync::mpsc::channel::<Vec<PathBuf>>();
+        let repaint = cc.egui_ctx.clone();
+        let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            if let Ok(ev) = res {
+                if !matches!(ev.kind, notify::EventKind::Access(_)) {
+                    let _ = fs_tx.send(ev.paths);
+                    repaint.request_repaint(); // wake the UI even when idle
+                }
+            }
+        })
+        .ok();
         let store = Store::load();
         apply_theme(&cc.egui_ctx, store.theme);
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("C:\\"));
@@ -255,6 +286,8 @@ impl App {
                     let p = PathBuf::from(&ts.path);
                     if p.is_dir() {
                         let mut t = Tab::new(p, show_hidden);
+                        t.search = store.search;
+                        t.exclude = store.exclude.clone();
                         t.sort = ts.sort;
                         t.asc = ts.asc;
                         t.rebuild_view(None);
@@ -264,7 +297,10 @@ impl App {
                 active = ps.active.min(tabs.len().saturating_sub(1));
             }
             if tabs.is_empty() {
-                tabs.push(Tab::new(default.to_path_buf(), show_hidden));
+                let mut t = Tab::new(default.to_path_buf(), show_hidden);
+                t.search = store.search;
+                t.exclude = store.exclude.clone();
+                tabs.push(t);
             }
             Pane { tabs, active, path_edit: None, focus_filter: false, rect: Rect::NOTHING, seen_tabs: (usize::MAX, 0) }
         };
@@ -276,7 +312,8 @@ impl App {
             bindings: actions::bindings(),
             palette: None,
             dialog: None,
-            job: None,
+            jobs: vec![],
+            jobs_open: true,
             clipboard: None,
             drag: None,
             drop_hover: None,
@@ -289,6 +326,12 @@ impl App {
             tab_drag: None,
             typeahead: (String::new(), Instant::now()),
             drives: list_drives(),
+            watcher,
+            fs_rx,
+            watched: HashMap::new(),
+            watch_failed: HashSet::new(),
+            fs_dirty: HashMap::new(),
+            fs_last: None,
             dirty: false,
             last_save: Instant::now(),
             last_title: String::new(),
@@ -354,6 +397,8 @@ impl App {
     fn open_new_tab(&mut self, pi: usize, path: PathBuf) {
         let sh = self.store.show_hidden;
         let mut t = Tab::new(path.clone(), sh);
+        t.search = self.store.search;
+        t.exclude = self.store.exclude.clone();
         if let Some(cur) = self.panes[pi].tabs.get(self.panes[pi].active) {
             t.sort = cur.sort;
             t.asc = cur.asc;
@@ -377,19 +422,16 @@ impl App {
     }
 
     fn start_op(&mut self, ctx: &Context, kind: OpKind, srcs: Vec<PathBuf>, dest: Option<PathBuf>) {
-        if self.job.is_some() {
-            self.say("Another operation is still running (Esc cancels it)");
-            return;
-        }
         if srcs.is_empty() {
             return;
         }
-        self.job = Some(ops::spawn(kind, srcs, dest, ctx.clone()));
+        self.jobs.push(ops::spawn(kind, srcs, dest, ctx.clone()));
+        self.jobs_open = true; // show the operations window
     }
 
-    fn poll_job(&mut self) {
-        let mut finished = None;
-        if let Some(job) = &mut self.job {
+    fn poll_jobs(&mut self, ctx: &Context) {
+        let mut finished: Vec<(OpKind, JobState)> = vec![];
+        for job in self.jobs.iter_mut().filter(|j| j.state == JobState::Running) {
             while let Ok(m) = job.rx.try_recv() {
                 match m {
                     Msg::Progress { done, total, current } => {
@@ -397,28 +439,43 @@ impl App {
                         job.total = total;
                         job.current = current;
                     }
-                    Msg::Done(r) => finished = Some((job.kind, r)),
+                    Msg::Done(r) => {
+                        job.finished = Some(Instant::now());
+                        job.state = match r {
+                            Ok(()) => JobState::Done,
+                            Err(e) if e == "Cancelled" => JobState::Cancelled,
+                            Err(e) => JobState::Failed(e),
+                        };
+                        finished.push((job.kind, job.state.clone()));
+                    }
                 }
             }
         }
-        if let Some((kind, r)) = finished {
-            self.job = None;
+        if !finished.is_empty() {
             for p in &mut self.panes {
                 p.tab_mut().selected.clear();
             }
             self.reload_all();
-            match r {
-                Ok(()) => {
-                    let verb = match kind {
-                        OpKind::Copy => "Copied",
-                        OpKind::Move => "Moved",
-                        OpKind::Trash => "Moved to Recycle Bin",
-                        OpKind::Delete => "Deleted",
-                    };
-                    self.say(format!("{verb}."));
-                }
-                Err(e) => self.say(format!("⚠ {e}")),
+            if let Some((kind, state)) = finished.pop() {
+                let msg = match state {
+                    JobState::Done => match kind {
+                        OpKind::Copy => "Copied.",
+                        OpKind::Move => "Moved.",
+                        OpKind::Trash => "Moved to Recycle Bin.",
+                        OpKind::Delete => "Deleted.",
+                    }
+                    .to_string(),
+                    JobState::Cancelled => "Cancelled.".to_string(),
+                    JobState::Failed(e) => format!("⚠ {e}"),
+                    JobState::Running => String::new(),
+                };
+                self.say(msg);
             }
+        }
+        // Successful / cancelled entries disappear after a few seconds; failures stay until dismissed.
+        self.jobs.retain(|j| !(matches!(j.state, JobState::Done | JobState::Cancelled) && j.finished.is_some_and(|t| t.elapsed() > Duration::from_secs(3))));
+        if self.jobs.iter().any(|j| j.finished.is_some()) {
+            ctx.request_repaint_after(Duration::from_millis(500));
         }
     }
 
@@ -453,6 +510,62 @@ impl App {
         self.dirty = true;
     }
 
+    /// Keeps exactly the folders of the two active tabs watched.
+    fn sync_watches(&mut self) {
+        let Some(w) = self.watcher.as_mut() else { return };
+        use notify::{RecursiveMode, Watcher};
+        let want: HashMap<String, PathBuf> = self.panes.iter().map(|p| (path_key(&p.tab().path), p.tab().path.clone())).collect();
+        let stale: Vec<String> = self.watched.keys().filter(|k| !want.contains_key(*k)).cloned().collect();
+        for k in stale {
+            if let Some(path) = self.watched.remove(&k) {
+                let _ = w.unwatch(&path);
+            }
+        }
+        self.watch_failed.retain(|k| want.contains_key(k));
+        for (k, path) in want {
+            if self.watched.contains_key(&k) || self.watch_failed.contains(&k) {
+                continue;
+            }
+            if w.watch(&path, RecursiveMode::NonRecursive).is_ok() {
+                self.watched.insert(k, path);
+            } else {
+                self.watch_failed.insert(k);
+            }
+        }
+    }
+
+    /// Debounced reload of folders that changed outside of exyex: waits until
+    /// the burst of events calms down (200 ms), but never longer than 1 s.
+    fn apply_fs_events(&mut self, ctx: &Context) {
+        let now = Instant::now();
+        while let Ok(paths) = self.fs_rx.try_recv() {
+            for p in paths {
+                self.fs_dirty.entry(path_key(&p)).or_insert(now);
+                if let Some(parent) = p.parent() {
+                    self.fs_dirty.entry(path_key(parent)).or_insert(now);
+                }
+            }
+            self.fs_last = Some(now);
+        }
+        if self.fs_dirty.is_empty() {
+            return;
+        }
+        let calm = self.fs_last.is_some_and(|t| t.elapsed() >= Duration::from_millis(200));
+        let overdue = self.fs_dirty.values().any(|t| t.elapsed() >= Duration::from_millis(1000));
+        if !(calm || overdue) {
+            ctx.request_repaint_after(Duration::from_millis(100));
+            return;
+        }
+        let dirty = std::mem::take(&mut self.fs_dirty);
+        self.fs_last = None;
+        for p in &mut self.panes {
+            let t = p.tab_mut();
+            if dirty.contains_key(&path_key(&t.path)) {
+                t.reload(None);
+            }
+        }
+    }
+
     fn tick(&mut self, ctx: &Context) {
         let mut requests = vec![];
         if let Some(s) = &self.ipc {
@@ -484,15 +597,35 @@ impl App {
         if self.inline.as_ref().is_some_and(|r| self.panes[r.pi].tab().path != r.dir) {
             self.inline = None; // navigated away while editing
         }
-        self.poll_job();
-        // Pick up external changes (cheap mtime poll on the visible tabs).
+        self.poll_jobs(ctx);
+        self.sync_watches();
+        self.apply_fs_events(ctx);
+        let mut walking = false;
+        for p in &mut self.panes {
+            for t in &mut p.tabs {
+                walking |= t.poll_deep();
+            }
+        }
+        if walking {
+            ctx.request_repaint_after(Duration::from_millis(60));
+        }
+        // Folders we could not watch (e.g. some network shares): fall back to a slow mtime poll.
         for p in &mut self.panes {
             let t = p.tab_mut();
-            if t.last_poll.elapsed() > Duration::from_millis(1200) {
+            if self.watched.contains_key(&path_key(&t.path)) {
+                continue;
+            }
+            if t.last_poll.elapsed() > Duration::from_millis(2000) {
                 t.last_poll = Instant::now();
                 if dir_mtime(&t.path) != t.mtime {
                     t.reload(None);
                 }
+            }
+        }
+        // A tab that just became active may be stale (only active tabs are watched).
+        for p in &mut self.panes {
+            if p.seen_tabs.0 != usize::MAX && p.seen_tabs.0 != p.active {
+                p.tab_mut().reload(None);
             }
         }
         ctx.request_repaint_after(Duration::from_millis(1200));
@@ -600,6 +733,25 @@ impl App {
                     self.say(format!("⚠ Could not open {}: {err}", e.name));
                 }
             }
+            ShowInFolder => {
+                let Some(e) = self.tab().current().filter(|e| !e.is_up).cloned() else { return };
+                let Some(parent) = e.path.parent().map(PathBuf::from) else { return };
+                let name = display_name(&e.path);
+                match self.panes[pi].tab_mut().go_focus(parent.clone(), Some(name)) {
+                    Ok(()) => {
+                        self.store.record_visit(&parent);
+                        self.dirty = true;
+                    }
+                    Err(err) => self.say(err),
+                }
+            }
+            Root => {
+                if let Some(root) = self.tab().path.ancestors().last().map(PathBuf::from) {
+                    if root != self.tab().path {
+                        self.navigate(pi, root);
+                    }
+                }
+            }
             OpenInNewTab => {
                 if let Some(e) = self.tab().current().cloned() {
                     let target = if e.is_dir { e.path } else { self.tab().path.clone() };
@@ -619,9 +771,11 @@ impl App {
                 self.panes[pi].focus_filter = true;
             }
             Copy | Move => {
-                let srcs = self.tab().targets();
+                let paths = self.tab().targets();
                 let dest = self.panes[self.other()].tab().path.clone();
-                self.start_op(ctx, if a == Copy { OpKind::Copy } else { OpKind::Move }, srcs, Some(dest));
+                if !paths.is_empty() {
+                    self.dialog = Some(Dialog::Transfer { kind: if a == Copy { OpKind::Copy } else { OpKind::Move }, paths, dest });
+                }
             }
             NewFolder => self.dialog = Some(Dialog::NewFolder { text: "New folder".into(), fresh: true }),
             NewFile => self.dialog = Some(Dialog::NewFile { text: "New file.txt".into(), fresh: true }),
@@ -650,6 +804,11 @@ impl App {
                 } else {
                     self.say("Clipboard is empty");
                 }
+            }
+            CopyFolderPath => {
+                let text = self.tab().path.display().to_string();
+                ctx.copy_text(text);
+                self.say("Folder path copied to clipboard");
             }
             CopyPath => {
                 let t = self.tab().targets();
@@ -698,6 +857,20 @@ impl App {
                 }
                 #[cfg(not(windows))]
                 let _ = open::that_detached(target.parent().unwrap_or(&target));
+            }
+            ExplorerHere => {
+                let dir = self.tab().path.clone();
+                if let Err(e) = std::process::Command::new("explorer.exe").arg(&dir).spawn() {
+                    self.say(format!("⚠ Could not start Explorer: {e}"));
+                }
+            }
+            PowerShellHere | CmdHere => {
+                let dir = self.tab().path.clone();
+                let exe = if matches!(a, PowerShellHere) { "powershell.exe" } else { "cmd.exe" };
+                let r = std::process::Command::new("cmd.exe").args(["/c", "start", "", exe]).current_dir(&dir).spawn();
+                if let Err(e) = r {
+                    self.say(format!("⚠ Could not start {exe}: {e}"));
+                }
             }
             Terminal => {
                 let dir = self.tab().path.clone();
@@ -762,7 +935,7 @@ impl App {
 
     fn start_inline(&mut self, pi: usize) {
         let tab = self.panes[pi].tab();
-        let Some(e) = tab.current().filter(|e| !e.is_up) else { return };
+        let Some(e) = tab.current().filter(|e| !e.is_up && !e.deep) else { return };
         self.inline = Some(InlineRename {
             pi,
             dir: tab.path.clone(),
@@ -902,8 +1075,11 @@ impl App {
             }
         }
         if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
-            if let Some(j) = &self.job {
-                j.cancel.store(true, Ordering::Relaxed);
+            if self.jobs.iter().any(|j| j.state == JobState::Running) {
+                for j in self.jobs.iter_mut().filter(|j| j.state == JobState::Running) {
+                    j.cancel.store(true, Ordering::Relaxed);
+                    j.cancelling = true;
+                }
                 self.say("Cancelling…");
             } else if !self.tab().filter.is_empty() || self.tab().filter_open {
                 let t = self.tab_mut();
@@ -1158,7 +1334,10 @@ impl App {
 
     fn ui_dialog(&mut self, ctx: &Context) {
         let Some(mut dlg) = self.dialog.take() else { return };
-        let (esc, enter) = ctx.input_mut(|i| (i.consume_key(Modifiers::NONE, Key::Escape), i.consume_key(Modifiers::NONE, Key::Enter)));
+        // In the confirm dialogs (delete, copy, move) Enter is left to the focused button (OK by default), so
+        // Tab -> Cancel -> Enter really cancels.
+        let is_confirm = matches!(dlg, Dialog::Delete { .. } | Dialog::Transfer { .. });
+        let (esc, enter) = ctx.input_mut(|i| (i.consume_key(Modifiers::NONE, Key::Escape), !is_confirm && i.consume_key(Modifiers::NONE, Key::Enter)));
         let mut ok = enter;
         let mut cancel = esc;
 
@@ -1167,6 +1346,8 @@ impl App {
             Dialog::NewFile { .. } => "New file",
             Dialog::Delete { permanent: true, .. } => "Delete permanently",
             Dialog::Delete { .. } => "Delete",
+            Dialog::Transfer { kind: OpKind::Move, .. } => "Move",
+            Dialog::Transfer { .. } => "Copy",
         };
         egui::Window::new(title)
             .collapsible(false)
@@ -1179,6 +1360,24 @@ impl App {
                     Dialog::NewFile { text, fresh } => {
                         let n = stem_len(text);
                         text_field(ui, text, fresh, Some(n))
+                    }
+                    Dialog::Transfer { kind, paths, dest } => {
+                        let verb = if *kind == OpKind::Move { "Move" } else { "Copy" };
+                        ui.label(if paths.len() == 1 {
+                            format!("{verb} \"{}\" to:", display_name(&paths[0]))
+                        } else {
+                            format!("{verb} {} items to:", paths.len())
+                        });
+                        ui.label(egui::RichText::new(dest.display().to_string()).strong());
+                        if paths.len() > 1 {
+                            ui.add_space(2.0);
+                            for p in paths.iter().take(6) {
+                                ui.weak(display_name(p));
+                            }
+                            if paths.len() > 6 {
+                                ui.weak(format!("… and {} more", paths.len() - 6));
+                            }
+                        }
                     }
                     Dialog::Delete { paths, permanent } => {
                         if *permanent {
@@ -1199,7 +1398,15 @@ impl App {
                 }
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    if ui.button("  OK  ").clicked() {
+                    let mut ok_btn = egui::Button::new("  OK  ");
+                    if is_confirm {
+                        ok_btn = ok_btn.fill(ACCENT.gamma_multiply(0.75));
+                    }
+                    let ok_resp = ui.add(ok_btn);
+                    if is_confirm && ctx.memory(|m| m.focused().is_none()) {
+                        ok_resp.request_focus(); // OK is the default button
+                    }
+                    if ok_resp.clicked() {
                         ok = true;
                     }
                     if ui.button("Cancel").clicked() {
@@ -1215,6 +1422,10 @@ impl App {
             match dlg {
                 Dialog::NewFolder { text, .. } => self.do_create(text.trim(), true),
                 Dialog::NewFile { text, .. } => self.do_create(text.trim(), false),
+                Dialog::Transfer { kind, paths, dest } => {
+                    let ctx = ctx.clone();
+                    self.start_op(&ctx, kind, paths, Some(dest));
+                }
                 Dialog::Delete { paths, permanent } => {
                     let ctx = ctx.clone();
                     self.start_op(&ctx, if permanent { OpKind::Delete } else { OpKind::Trash }, paths, None);
@@ -1230,12 +1441,20 @@ impl App {
     fn ui_status(&mut self, ui: &mut Ui, evs: &mut Vec<Ev>) {
         let theme_label = format!("Theme: {}", self.store.theme.label());
         let theme_label = theme_label.as_str();
+        let running: Option<(f32, String)> = {
+            let r: Vec<&Job> = self.jobs.iter().filter(|j| j.state == JobState::Running).collect();
+            r.last().map(|j| {
+                let frac = if j.total > 0 { (j.done as f32 / j.total as f32).clamp(0.0, 1.0) } else { 0.0 };
+                let more = if r.len() > 1 { format!("  (+{} more)", r.len() - 1) } else { String::new() };
+                (frac, format!("{}{}", j.title, more))
+            })
+        };
+        let mut toggle_jobs = false;
         ui.horizontal(|ui| {
-            if let Some(job) = &self.job {
-                let frac = if job.total > 0 { job.done as f32 / job.total as f32 } else { 0.0 };
-                ui.add(egui::ProgressBar::new(frac.clamp(0.0, 1.0)).desired_width(220.0).text(format!("{} {}", job.kind.verb(), job.current)));
-                if ui.button("Cancel").clicked() {
-                    job.cancel.store(true, Ordering::Relaxed);
+            if let Some((frac, text)) = &running {
+                ui.add(egui::ProgressBar::new(*frac).desired_width(240.0).text(text.as_str()));
+                if chip(ui, "Details", false, None).on_hover_text("Show / hide the operations window").clicked() {
+                    toggle_jobs = true;
                 }
             } else {
                 ui.label(&self.status);
@@ -1256,6 +1475,63 @@ impl App {
                 }
             });
         });
+        if toggle_jobs {
+            self.jobs_open = !self.jobs_open;
+        }
+    }
+
+    /// Operations list in its own native window: it has its own title bar, can be
+    /// moved to another monitor, resized, minimized and maximized, and never blocks
+    /// the main window.
+    fn ui_jobs(&mut self, ctx: &Context) {
+        if self.jobs.is_empty() || !self.jobs_open {
+            return;
+        }
+        let size = vec2(440.0, 300.0);
+        let mut builder = egui::ViewportBuilder::default()
+            .with_title("exyex — Operations")
+            .with_inner_size(size)
+            .with_min_inner_size([340.0, 150.0])
+            .with_icon(egui::IconData { rgba: crate::icon_draw::render_icon(64), width: 64, height: 64 })
+            .with_active(false); // do not steal focus from the file manager
+        // First placement: bottom-right corner of the main window (only used when the window is created).
+        if let Some(r) = ctx.input(|i| i.viewport().outer_rect) {
+            builder = builder.with_position(pos2(r.right() - size.x - 24.0, r.bottom() - size.y - 70.0));
+        }
+        let mut close = false;
+        let mut dismiss: Vec<u64> = vec![];
+        let jobs = &mut self.jobs;
+        ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("exyex-operations"), builder, |ui, class| {
+            if ui.ctx().input(|i| i.viewport().close_requested()) {
+                close = true;
+                return;
+            }
+            let mut body = |ui: &mut Ui| {
+                let running = jobs.iter().filter(|j| j.state == JobState::Running).count();
+                ui.label(egui::RichText::new(format!("{} operation(s), {} running", jobs.len(), running)).weak());
+                ui.separator();
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    for (i, j) in jobs.iter_mut().enumerate() {
+                        if i > 0 {
+                            ui.separator();
+                        }
+                        job_row(ui, j, &mut dismiss);
+                    }
+                });
+            };
+            if class == egui::ViewportClass::EmbeddedWindow {
+                // Backend without multi-window support: fall back to an in-app window.
+                egui::Window::new("Operations").show(ui.ctx(), |ui| body(ui));
+            } else {
+                egui::CentralPanel::default().show(ui, |ui| body(ui));
+            }
+        });
+        if close {
+            self.jobs_open = false;
+        }
+        if !dismiss.is_empty() {
+            self.jobs.retain(|j| !dismiss.contains(&j.id));
+        }
     }
 
     fn ui_pane(&mut self, ui: &mut Ui, pi: usize, evs: &mut Vec<Ev>) {
@@ -1375,6 +1651,9 @@ impl App {
             if icon_btn(ui, Ico::Up, tab.path.parent().is_some(), "Up (Backspace)").clicked() {
                 evs.push(Ev::Run(Action::Up));
             }
+            if icon_btn(ui, Ico::Root, tab.path.parent().is_some(), "Root of drive (Ctrl+Backspace)").clicked() {
+                evs.push(Ev::Run(Action::Root));
+            }
             ui.add_space(4.0);
             egui::Frame::new()
                 .fill(ui.visuals().extreme_bg_color)
@@ -1398,13 +1677,50 @@ impl App {
             }
         }
 
-        // --- filter bar
+        // --- search bar (Ctrl+F): live, with Smart / Fuzzy / Wildcard / Regex modes
         if tab.filter_open {
+            let opts = tab.search;
+            let err = tab.matcher.error().map(str::to_string);
+            let edit_id = egui::Id::new(("search-edit", pi));
+            // Keys are consumed *before* the text field sees them, and only while it has focus.
+            let focused = *focus_filter || ctx.memory(|m| m.has_focus(edit_id));
+            let (mut esc, mut enter, mut up, mut down, mut pgup, mut pgdn, mut tab_key) = (false, false, false, false, false, false, false);
+            let mut mode_key: Option<SearchMode> = None;
+            let mut case_key = false;
+            let mut deep_key = false;
+            let mut show_key = false;
+            if focused {
+                ctx.input_mut(|i| {
+                    esc = i.consume_key(Modifiers::NONE, Key::Escape);
+                    enter = i.consume_key(Modifiers::NONE, Key::Enter);
+                    up = i.consume_key(Modifiers::NONE, Key::ArrowUp);
+                    down = i.consume_key(Modifiers::NONE, Key::ArrowDown);
+                    pgup = i.consume_key(Modifiers::NONE, Key::PageUp);
+                    pgdn = i.consume_key(Modifiers::NONE, Key::PageDown);
+                    tab_key = i.consume_key(Modifiers::NONE, Key::Tab);
+                    for (k, m) in [(Key::Num1, SearchMode::Smart), (Key::Num2, SearchMode::Fuzzy), (Key::Num3, SearchMode::Wildcard), (Key::Num4, SearchMode::Regex)] {
+                        if i.consume_key(Modifiers::ALT, k) {
+                            mode_key = Some(m);
+                        }
+                    }
+                    case_key = i.consume_key(Modifiers::ALT, Key::C);
+                    deep_key = i.consume_key(Modifiers::ALT, Key::S);
+                    show_key = i.consume_key(Modifiers::ALT, Key::Enter);
+                });
+            }
             ui.horizontal(|ui| {
-                ui.label("Filter:");
-                let r = ui.add(egui::TextEdit::singleline(&mut tab.filter).hint_text("text · *.ext · !exclude").desired_width(260.0));
+                ui.spacing_mut().item_spacing.x = 4.0;
+                let w = (ui.available_width() - 400.0 - if opts.deep { 170.0 } else { 0.0 }).max(120.0);
+                let mut out = egui::TextEdit::singleline(&mut tab.filter).id(edit_id).hint_text(opts.mode.hint()).desired_width(w).show(ui);
+                let r = out.response.clone();
+                if err.is_some() {
+                    ui.painter().rect_stroke(r.rect.expand(1.0), 4.0, Stroke::new(1.5, ui.visuals().error_fg_color), egui::StrokeKind::Outside);
+                }
                 if *focus_filter {
                     r.request_focus();
+                    let end = tab.filter.chars().count();
+                    out.state.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(end))));
+                    out.state.store(&ctx, edit_id);
                     *focus_filter = false;
                 }
                 if r.changed() {
@@ -1412,16 +1728,75 @@ impl App {
                     tab.set_cursor(0);
                     tab.want_scroll = Some(0.0);
                 }
-                let (esc, enter, down) = ctx.input(|i| (i.key_pressed(Key::Escape), i.key_pressed(Key::Enter), i.key_pressed(Key::ArrowDown)));
-                if r.has_focus() && esc {
+                // result navigation without leaving the box
+                let page = ((tab.view_h / ROW_H) as isize - 1).max(1);
+                if up {
+                    tab.move_cursor(-1, false);
+                }
+                if down {
+                    tab.move_cursor(1, false);
+                }
+                if pgup {
+                    tab.move_cursor(-page, false);
+                }
+                if pgdn {
+                    tab.move_cursor(page, false);
+                }
+                if show_key {
+                    evs.push(Ev::Run(Action::ShowInFolder));
+                }
+                if enter {
+                    evs.push(Ev::Run(Action::Open));
+                }
+                if tab_key {
+                    r.surrender_focus(); // hand the keyboard to the list
+                }
+                if esc {
                     tab.filter.clear();
                     tab.filter_open = false;
                     tab.rebuild_view(None);
-                } else if r.has_focus() && (enter || down) {
-                    r.surrender_focus();
                 }
-                ui.weak(format!("{} / {}", tab.view.len().saturating_sub(tab.has_up() as usize), tab.entries.len().saturating_sub(tab.has_up() as usize)));
-                if ui.small_button("✕").clicked() {
+                // mode chips + case toggle
+                for m in SearchMode::ALL {
+                    if chip(ui, m.label(), opts.mode == m, None).on_hover_text(m.tooltip()).clicked() {
+                        evs.push(Ev::SetSearch(SearchOpts { mode: m, ..opts }));
+                    }
+                }
+                if chip(ui, "Aa", opts.match_case, None).on_hover_text("Match case (Alt+C)").clicked() {
+                    evs.push(Ev::SetSearch(SearchOpts { match_case: !opts.match_case, ..opts }));
+                }
+                if chip(ui, "Subfolders", opts.deep, None).on_hover_text("Search inside subfolders too (Alt+S)\nResults show the path relative to this folder.").clicked() || deep_key {
+                    evs.push(Ev::SetSearch(SearchOpts { deep: !opts.deep, ..opts }));
+                }
+                if opts.deep {
+                    let before = tab.exclude.clone();
+                    let ex = egui::TextEdit::singleline(&mut tab.exclude)
+                        .hint_text("exclude: node_modules, .git, *.tmp")
+                        .desired_width(160.0)
+                        .show(ui);
+                    let r: egui::Response = (*ex.response).clone();
+                    r.clone().on_hover_text("Names or wildcards to skip while searching subfolders,\nseparated by comma. Nothing is excluded by default.");
+                    if r.changed() && tab.exclude != before {
+                        tab.rebuild_view(None);
+                        evs.push(Ev::SetExclude(tab.exclude.clone()));
+                    }
+                }
+                if let Some(m) = mode_key {
+                    evs.push(Ev::SetSearch(SearchOpts { mode: m, ..opts }));
+                }
+                if case_key {
+                    evs.push(Ev::SetSearch(SearchOpts { match_case: !opts.match_case, ..opts }));
+                }
+                let found = tab.view.len().saturating_sub(tab.has_up() as usize * tab.matcher.is_all() as usize);
+                if let Some(e) = &err {
+                    ui.colored_label(ui.visuals().error_fg_color, "invalid").on_hover_text(e.as_str());
+                } else if let Some((running, truncated)) = tab.deep_status() {
+                    let more = if truncated { "+ (limit)" } else if running { " …" } else { "" };
+                    ui.weak(format!("{found}{more}"));
+                } else {
+                    ui.weak(format!("{found} / {}", tab.entries.iter().filter(|e| !e.is_up && !e.deep).count()));
+                }
+                if chip(ui, "✕", false, None).on_hover_text("Close search (Esc)").clicked() {
                     tab.filter.clear();
                     tab.filter_open = false;
                     tab.rebuild_view(None);
@@ -1455,6 +1830,32 @@ impl App {
         let list_h = (ui.available_height() - footer_h).max(40.0);
         let list_w = ui.available_width();
         ui.allocate_ui(vec2(list_w, list_h), |ui| {
+            // Right-click on the empty space below the files. Registered before the
+            // rows, so rows (added later) keep priority over it.
+            let list_rect = Rect::from_min_size(ui.cursor().min, vec2(list_w, list_h));
+            let bg = ui.interact(list_rect, ui.scope_id().with(("list-bg", pi)), Sense::click());
+            let can_paste = clipboard.is_some();
+            bg.context_menu(|ui| {
+                for (label, a, enabled) in [
+                    ("New folder", Action::NewFolder, true),
+                    ("New file", Action::NewFile, true),
+                    ("Paste", Action::ClipPaste, can_paste),
+                    ("Select all", Action::SelectAll, true),
+                    ("Refresh", Action::Refresh, true),
+                    ("Copy folder path", Action::CopyFolderPath, true),
+                    ("Open terminal here", Action::Terminal, true),
+                    ("Open folder in Windows Explorer", Action::ExplorerHere, true),
+                    ("Show hidden files", Action::ToggleHidden, true),
+                    ("Sort by name", Action::SortName, true),
+                    ("Sort by date", Action::SortDate, true),
+                    ("Sort by size", Action::SortSize, true),
+                ] {
+                    if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+                        evs.push(Ev::Run(a));
+                        ui.close();
+                    }
+                }
+            });
             if let Some(err) = &tab.error {
                 ui.colored_label(ui.visuals().error_fg_color, format!("⚠ {err}"));
                 return;
@@ -1520,7 +1921,19 @@ impl App {
                             inline_edit(ui, edit_rect, ir, e.is_dir);
                         }
                     } else {
-                        ui.painter().with_clip_rect(c_name).text(pos2(c_name.left() + 26.0, rect.center().y), Align2::LEFT_CENTER, &e.name, FontId::proportional(14.0), col);
+                        let name_x = c_name.left() + 26.0;
+                        let painter = ui.painter().with_clip_rect(c_name);
+                        let galley = painter.layout_no_wrap(e.name.clone(), FontId::proportional(14.0), col);
+                        let top = rect.center().y - galley.size().y / 2.0;
+                        if !tab.filter.is_empty() {
+                            let hl = if dark { Color32::from_rgba_unmultiplied(255, 200, 0, 80) } else { Color32::from_rgba_unmultiplied(255, 190, 0, 120) };
+                            for (a, b) in tab.matcher.ranges(&e.name) {
+                                let x0 = galley.pos_from_cursor(egui::text::CCursor::new(a)).min.x;
+                                let x1 = galley.pos_from_cursor(egui::text::CCursor::new(b)).min.x;
+                                painter.rect_filled(Rect::from_min_max(pos2(name_x + x0 - 1.0, top), pos2(name_x + x1 + 1.0, top + galley.size().y)), 2.0, hl);
+                            }
+                        }
+                        painter.galley(pos2(name_x, top), galley, col);
                     }
                     let dim = if on_accent { Color32::from_gray(225) } else { ui.visuals().weak_text_color() };
                     let p = ui.painter();
@@ -1563,6 +1976,7 @@ impl App {
                             ("Paste", Action::ClipPaste),
                             ("Copy path", Action::CopyPath),
                             ("New folder", Action::NewFolder),
+                            ("Open containing folder  (Alt+Enter)", Action::ShowInFolder),
                             ("Show in Windows Explorer", Action::Reveal),
                             ("Delete", Action::Delete),
                         ] {
@@ -1604,6 +2018,7 @@ enum Ico {
     Back,
     Fwd,
     Up,
+    Root,
     Plus,
     Close,
     Down,
@@ -1615,6 +2030,7 @@ fn paint_icon(p: &egui::Painter, c: Pos2, ico: Ico, col: Color32) {
         Ico::Back => &[[(-5.0, 0.0), (5.0, 0.0)], [(-5.0, 0.0), (-1.0, -4.0)], [(-5.0, 0.0), (-1.0, 4.0)]],
         Ico::Fwd => &[[(-5.0, 0.0), (5.0, 0.0)], [(5.0, 0.0), (1.0, -4.0)], [(5.0, 0.0), (1.0, 4.0)]],
         Ico::Up => &[[(0.0, 5.0), (0.0, -5.0)], [(0.0, -5.0), (-4.0, -1.0)], [(0.0, -5.0), (4.0, -1.0)]],
+        Ico::Root => &[[(-5.0, -5.0), (5.0, -5.0)], [(0.0, 5.0), (0.0, -3.0)], [(0.0, -3.0), (-3.5, 0.5)], [(0.0, -3.0), (3.5, 0.5)]],
         Ico::Plus => &[[(-4.5, 0.0), (4.5, 0.0)], [(0.0, -4.5), (0.0, 4.5)]],
         Ico::Close => &[[(-3.0, -3.0), (3.0, 3.0)], [(-3.0, 3.0), (3.0, -3.0)]],
         Ico::Down => &[[(-4.0, -2.0), (0.0, 2.0)], [(0.0, 2.0), (4.0, -2.0)]],
@@ -1637,6 +2053,67 @@ fn icon_btn(ui: &mut Ui, ico: Ico, enabled: bool, tip: &str) -> egui::Response {
     let base = ui.visuals().text_color();
     paint_icon(ui.painter(), rect.center(), ico, if enabled { base } else { base.gamma_multiply(0.3) });
     if enabled { resp.on_hover_text(tip) } else { resp }
+}
+
+fn fmt_dur(secs: f64) -> String {
+    let s = secs.round() as u64;
+    if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, (s / 60) % 60, s % 60) } else { format!("{}:{:02}", s / 60, s % 60) }
+}
+
+fn job_row(ui: &mut Ui, j: &mut Job, dismiss: &mut Vec<u64>) {
+    let state = j.state.clone();
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(&j.title).strong());
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| match &state {
+            JobState::Running => {
+                let label = if j.cancelling { "Cancelling…" } else { "Cancel" };
+                if ui.add_enabled(!j.cancelling, egui::Button::new(label)).clicked() {
+                    j.cancel.store(true, Ordering::Relaxed);
+                    j.cancelling = true;
+                }
+            }
+            JobState::Failed(_) => {
+                if ui.button("Dismiss").clicked() {
+                    dismiss.push(j.id);
+                }
+            }
+            _ => {}
+        });
+    });
+    if let Some(d) = &j.dest {
+        ui.weak(format!("to {}", d.display()));
+    }
+    match &state {
+        JobState::Running => {
+            let indeterminate = j.kind == OpKind::Trash;
+            let frac = if j.total > 0 && !indeterminate { (j.done as f32 / j.total as f32).clamp(0.0, 1.0) } else { 0.0 };
+            ui.add(egui::ProgressBar::new(frac).desired_width(ui.available_width()).show_percentage().animate(indeterminate));
+            let el = j.started.elapsed().as_secs_f64().max(0.001);
+            let info = match j.kind {
+                OpKind::Copy | OpKind::Move if j.total > 0 => {
+                    let rate = j.done as f64 / el;
+                    let left = if rate > 1.0 && j.total > j.done { (j.total - j.done) as f64 / rate } else { 0.0 };
+                    let eta = if left > 0.5 && el > 1.5 { format!(" · {} left", fmt_dur(left)) } else { String::new() };
+                    format!("{} of {} · {}/s{}", fmt_size(j.done), fmt_size(j.total), fmt_size(rate as u64), eta)
+                }
+                OpKind::Delete => format!("{} of {} items", j.done, j.total),
+                _ => "Working…".to_string(),
+            };
+            ui.weak(info);
+            if !j.current.is_empty() && !indeterminate {
+                ui.add(egui::Label::new(egui::RichText::new(&j.current).weak()).truncate());
+            }
+        }
+        JobState::Done => {
+            ui.colored_label(Color32::from_rgb(70, 170, 90), "✓ Done");
+        }
+        JobState::Cancelled => {
+            ui.weak("Cancelled");
+        }
+        JobState::Failed(e) => {
+            ui.colored_label(ui.visuals().error_fg_color, format!("⚠ {e}"));
+        }
+    }
 }
 
 fn tab_menu_item(ui: &mut Ui, evs: &mut Vec<Ev>, pi: usize, i: usize, label: &str, enabled: bool, cmd: TabCmd) {
@@ -2104,6 +2581,7 @@ impl eframe::App for App {
         self.finish_drag(&ctx);
         self.ui_palette(&ctx);
         self.ui_dialog(&ctx);
+        self.ui_jobs(&ctx);
         if self.quit {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
@@ -2259,6 +2737,28 @@ impl App {
             Ev::DragStart { pi, paths } => {
                 self.active = pi;
                 self.drag = Some(Drag { from: pi, paths });
+            }
+            Ev::SetSearch(o) => {
+                self.store.search = o;
+                for p in &mut self.panes {
+                    for t in &mut p.tabs {
+                        t.search = o;
+                        if !t.filter.is_empty() {
+                            t.rebuild_view(None);
+                            t.set_cursor(0);
+                        }
+                    }
+                }
+                self.dirty = true;
+            }
+            Ev::SetExclude(s) => {
+                self.store.exclude = s.clone();
+                for p in &mut self.panes {
+                    for t in &mut p.tabs {
+                        t.exclude = s.clone();
+                    }
+                }
+                self.dirty = true;
             }
             Ev::TabDrag(pi, i) => self.tab_drag = Some((pi, i)),
             Ev::DropHover(p) => self.drop_hover = Some(p),

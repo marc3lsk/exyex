@@ -2,12 +2,14 @@
 
 mod actions;
 mod app;
+mod deep;
 mod icon_draw;
 mod icons;
 #[cfg(windows)]
 mod install;
 mod model;
 mod ops;
+mod search;
 mod single;
 mod store;
 

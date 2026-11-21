@@ -1,5 +1,6 @@
 //! Directory listing, sorting, filtering and per-tab navigation state.
 
+use crate::search::{Matcher, SearchOpts, compile};
 use serde::{Deserialize, Serialize};
 use std::{
     cmp::Ordering,
@@ -28,6 +29,8 @@ pub struct Entry {
     pub hidden: bool,
     /// The virtual ".." row that goes to the parent folder.
     pub is_up: bool,
+    /// A result of the subfolder search (`name` is then the relative path).
+    pub deep: bool,
     pub ext: String,
 }
 
@@ -64,6 +67,7 @@ pub fn read_dir(p: &Path) -> std::io::Result<Vec<Entry>> {
             is_dir,
             hidden,
             is_up: false,
+            deep: false,
             ext,
         });
     }
@@ -81,6 +85,7 @@ pub fn with_up(mut v: Vec<Entry>, path: &Path) -> Vec<Entry> {
             modified: None,
             hidden: false,
             is_up: true,
+            deep: false,
             ext: String::new(),
         });
     }
@@ -130,51 +135,6 @@ pub fn natural_cmp(a: &str, b: &str) -> Ordering {
 }
 
 // ---------------------------------------------------------------- filtering
-
-/// Case-insensitive glob with `*` and `?`.
-pub fn glob_match(pat: &str, text: &str) -> bool {
-    let p: Vec<char> = pat.to_lowercase().chars().collect();
-    let t: Vec<char> = text.to_lowercase().chars().collect();
-    let (mut pi, mut ti, mut star, mut mark) = (0, 0, None, 0);
-    while ti < t.len() {
-        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
-            pi += 1;
-            ti += 1;
-        } else if pi < p.len() && p[pi] == '*' {
-            star = Some(pi);
-            mark = ti;
-            pi += 1;
-        } else if let Some(s) = star {
-            pi = s + 1;
-            mark += 1;
-            ti = mark;
-        } else {
-            return false;
-        }
-    }
-    while pi < p.len() && p[pi] == '*' {
-        pi += 1;
-    }
-    pi == p.len()
-}
-
-/// Filter syntax: space separated tokens, all must match. A token is a plain
-/// substring, a glob (`*.rs`), or negated with a leading `!`.
-pub fn filter_matches(filter: &str, name: &str) -> bool {
-    let lname = name.to_lowercase();
-    filter.split_whitespace().all(|tok| {
-        let (neg, tok) = match tok.strip_prefix('!') {
-            Some(r) if !r.is_empty() => (true, r),
-            _ => (false, tok),
-        };
-        let m = if tok.contains('*') || tok.contains('?') {
-            glob_match(tok, name)
-        } else {
-            lname.contains(&tok.to_lowercase())
-        };
-        m != neg
-    })
-}
 
 // ------------------------------------------------------------ path helpers
 
@@ -266,6 +226,12 @@ pub struct Tab {
     pub selected: HashSet<PathBuf>,
     pub filter: String,
     pub filter_open: bool,
+    pub search: SearchOpts,
+    pub matcher: Matcher,
+    pub exclude: String,
+    pub deep_res: Vec<Entry>,
+    pub deep_job: Option<crate::deep::DeepJob>,
+    deep_key: String,
     pub sort: SortKey,
     pub asc: bool,
     pub show_hidden: bool,
@@ -290,6 +256,12 @@ impl Tab {
             selected: HashSet::new(),
             filter: String::new(),
             filter_open: false,
+            search: SearchOpts::default(),
+            matcher: Matcher::default(),
+            exclude: String::new(),
+            deep_res: vec![],
+            deep_job: None,
+            deep_key: String::new(),
             sort: SortKey::Name,
             asc: true,
             show_hidden,
@@ -345,6 +317,9 @@ impl Tab {
             }
         }
         self.mtime = dir_mtime(&self.path);
+        if !self.deep_res.is_empty() {
+            self.entries.extend(self.deep_res.iter().cloned());
+        }
         let names: HashSet<&PathBuf> = self.entries.iter().map(|e| &e.path).collect();
         self.selected.retain(|p| names.contains(p));
         self.rebuild_view(keep);
@@ -353,34 +328,45 @@ impl Tab {
     pub fn rebuild_view(&mut self, keep: Option<String>) {
         let keep = keep.or_else(|| self.current().map(|e| e.name.clone()));
         let (key, asc) = (self.sort, self.asc);
-        let mut idx: Vec<usize> = (0..self.entries.len())
-            .filter(|&i| {
-                let e = &self.entries[i];
-                !e.is_up && (self.show_hidden || !e.hidden) && (self.filter.is_empty() || filter_matches(&self.filter, &e.name))
-            })
+        self.matcher = compile(&self.filter, self.search);
+        self.sync_deep();
+        let deep = self.deep_active();
+        let ranked = self.matcher.ranked();
+        let mut scored: Vec<(i32, usize)> = (0..self.entries.len())
+            .filter(|&i| !self.entries[i].is_up && self.entries[i].deep == deep && (self.show_hidden || !self.entries[i].hidden))
+            .filter_map(|i| self.matcher.score(&self.entries[i].name).map(|sc| (sc, i)))
             .collect();
         let entries = &self.entries;
-        idx.sort_by(|&a, &b| {
-            let (x, y) = (&entries[a], &entries[b]);
-            y.is_dir.cmp(&x.is_dir).then_with(|| {
-                let by_name = natural_cmp(&x.name, &y.name);
-                let o = match key {
-                    SortKey::Name => by_name,
-                    SortKey::Ext => x.ext.cmp(&y.ext).then(by_name),
-                    SortKey::Size => {
-                        if x.is_dir {
-                            by_name
-                        } else {
-                            x.size.cmp(&y.size).then(by_name)
+        if ranked {
+            // fuzzy: best match first (ties: shorter / natural name order)
+            scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| natural_cmp(&entries[a.1].name, &entries[b.1].name)));
+        } else {
+            scored.sort_by(|&(_, a), &(_, b)| {
+                let (x, y) = (&entries[a], &entries[b]);
+                y.is_dir.cmp(&x.is_dir).then_with(|| {
+                    let by_name = natural_cmp(&x.name, &y.name);
+                    let o = match key {
+                        SortKey::Name => by_name,
+                        SortKey::Ext => x.ext.cmp(&y.ext).then(by_name),
+                        SortKey::Size => {
+                            if x.is_dir {
+                                by_name
+                            } else {
+                                x.size.cmp(&y.size).then(by_name)
+                            }
                         }
-                    }
-                    SortKey::Modified => x.modified.cmp(&y.modified).then(by_name),
-                };
-                if asc { o } else { o.reverse() }
-            })
-        });
-        if let Some(up) = self.entries.iter().position(|e| e.is_up) {
-            idx.insert(0, up);
+                        SortKey::Modified => x.modified.cmp(&y.modified).then(by_name),
+                    };
+                    if asc { o } else { o.reverse() }
+                })
+            });
+        }
+        let mut idx: Vec<usize> = scored.into_iter().map(|(_, i)| i).collect();
+        // the ".." row only shows while not searching
+        if self.matcher.is_all() {
+            if let Some(up) = self.entries.iter().position(|e| e.is_up) {
+                idx.insert(0, up);
+            }
         }
         self.view = idx;
         self.cursor = keep
@@ -389,6 +375,64 @@ impl Tab {
             .min(self.view.len().saturating_sub(1));
         self.anchor = self.cursor;
         self.ensure_visible();
+    }
+
+    /// Subfolder search is on and there is something to look for.
+    pub fn deep_active(&self) -> bool {
+        self.search.deep && !self.filter.is_empty()
+    }
+
+    /// (running, truncated) while a subfolder search is active.
+    pub fn deep_status(&self) -> Option<(bool, bool)> {
+        self.deep_job.as_ref().filter(|_| self.deep_active()).map(|j| (j.running, j.truncated))
+    }
+
+    /// Starts / restarts / stops the background walk when the query changed.
+    fn sync_deep(&mut self) {
+        let key = if self.deep_active() {
+            format!("{}|{:?}|{}|{}", self.filter, self.search, self.exclude, self.show_hidden)
+        } else {
+            String::new()
+        };
+        if key == self.deep_key {
+            return;
+        }
+        self.deep_key = key;
+        self.deep_job = None; // drop cancels the old walk
+        self.deep_res.clear();
+        self.entries.retain(|e| !e.deep);
+        if self.deep_active() {
+            self.deep_job = Some(crate::deep::spawn(
+                self.path.clone(),
+                self.filter.clone(),
+                self.search,
+                crate::deep::parse_exclude(&self.exclude),
+                self.show_hidden,
+            ));
+        }
+    }
+
+    /// Takes the results found so far. Returns true while the walk is still running.
+    pub fn poll_deep(&mut self) -> bool {
+        use crate::deep::DeepMsg;
+        let Some(job) = self.deep_job.as_mut() else { return false };
+        let mut got = Vec::new();
+        while let Ok(m) = job.rx.try_recv() {
+            match m {
+                DeepMsg::Batch(v) => got.extend(v),
+                DeepMsg::Done { truncated } => {
+                    job.running = false;
+                    job.truncated = truncated;
+                }
+            }
+        }
+        let running = job.running;
+        if !got.is_empty() {
+            self.deep_res.extend(got.iter().cloned());
+            self.entries.extend(got);
+            self.rebuild_view(None);
+        }
+        running
     }
 
     pub fn set_sort(&mut self, key: SortKey) {
@@ -434,16 +478,27 @@ impl Tab {
     }
 
     pub fn go(&mut self, to: PathBuf) -> Result<(), String> {
+        self.go_focus(to, None)
+    }
+
+    /// Like `go`, but puts the cursor on `focus` (a name in the target folder).
+    pub fn go_focus(&mut self, to: PathBuf, focus: Option<String>) -> Result<(), String> {
         if to == self.path {
-            self.reload(None);
+            if focus.is_some() {
+                self.filter.clear();
+                self.filter_open = false;
+            }
+            self.reload(focus);
             return Ok(());
         }
         let entries = Self::load(&to)?;
-        let focus = if self.path.parent() == Some(to.as_path()) {
-            self.path.file_name().map(|n| n.to_string_lossy().into_owned())
-        } else {
-            None
-        };
+        let focus = focus.or_else(|| {
+            if self.path.parent() == Some(to.as_path()) {
+                self.path.file_name().map(|n| n.to_string_lossy().into_owned())
+            } else {
+                None
+            }
+        });
         let old = std::mem::replace(&mut self.path, PathBuf::new());
         self.back.push(old);
         self.fwd.clear();

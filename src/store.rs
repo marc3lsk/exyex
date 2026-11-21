@@ -56,6 +56,11 @@ impl ThemeChoice {
 pub struct Store {
     #[serde(default)]
     pub theme: ThemeChoice,
+    #[serde(default)]
+    pub search: crate::search::SearchOpts,
+    /// Manual exclude list for subfolder search (names / globs, `,`-separated).
+    #[serde(default)]
+    pub exclude: String,
     pub favorites: Vec<String>,
     pub visits: HashMap<String, Visit>,
     pub panes: Vec<PaneSession>,

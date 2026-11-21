@@ -1,0 +1,65 @@
+# exyex – notes for agents
+
+Native Rust (egui/eframe 0.37, Rust 2024) dual-pane file manager for **Windows** – a "next-gen" mix of Explorer and
+Total Commander. No web UI. User-facing docs (keys, search, install) are in `README.md`; this file is what you need
+to change the code safely. The user writes Slovak; answer in Slovak, keep code/comments in English.
+
+## Commands
+- `cargo build` / `cargo test` (13 tests: ops, search, deep). `.\dev.ps1` (-Release, -Watch), `.\bump-version.ps1`,
+  `.\release.ps1 -Bundle exe|setup|zip|all` (outputs to `release\`, git-ignored).
+- **Kill the running app before building** (`taskkill /F /IM exyex.exe`), otherwise the exe is locked.
+- Not a git repo yet (no commits made).
+
+## Source map (`src/`)
+| File | Role |
+|---|---|
+| `main.rs` | entry: `--install/--uninstall`, `*_setup.exe` wizard, single-instance check, eframe options |
+| `app.rs` (largest) | `App` state, all UI (`ui_pane`, dialogs, palette, jobs window), `Ev` event queue, `run(Action)`, themes |
+| `model.rs` | `Entry`, `Tab` (entries/view/cursor/selection/history/sort/filter), `rebuild_view`, path helpers |
+| `search.rs` | in-folder search: `SearchMode` (Smart/Fuzzy/Wildcard/Regex), `compile -> Matcher` (score/ranges), `glob_match` |
+| `deep.rs` | "Subfolders" search: background BFS walker streaming `DeepMsg::Batch` |
+| `actions.rs` | `Action` enum, `bindings()` key table, palette list, names |
+| `ops.rs` | copy/move/trash/delete as background jobs (mpsc + cancel flag, progress, conflict naming) |
+| `store.rs` | persisted state `%APPDATA%\exyex\state.json` (favorites, frecency visits, session, theme, search opts, exclude) |
+| `single.rs` | single instance: named mutex + pipe `\\.\pipe\exyex-<USER>`; `exyex <path>` opens a tab in the running app |
+| `install.rs` | per-user self-installer (HKCU Path, Apps & features, Start menu). **Never run on the user's machine / untested** |
+| `icons.rs`, `icon_draw.rs`, `build.rs` | shell icons per extension; generated app icon (also embedded in exe via build.rs) |
+
+## Architecture rules
+- **Immediate mode + event queue:** while drawing, UI code pushes `Ev` values; they are applied after drawing
+  (`App::apply`). Do not mutate panes/tabs structurally mid-draw. Keyboard goes through `Action` + `bindings()`
+  (most specific modifier combos first – the first match consumes the key).
+- **Tab view:** `entries` = raw folder content (+ virtual `..` row, `is_up`); `view` = indices after filter/sort.
+  Always call `rebuild_view` after changing `filter`, `search`, `sort`, `entries`. Selection is by path.
+- **Search:** `Tab.search` (`SearchOpts`: mode, match_case, deep) + `Tab.filter` + `Tab.matcher`. Options are stored in
+  `Store` and copied into every tab (`Ev::SetSearch`, new tabs inherit). Search-box keys are consumed only while it
+  has focus. `..` is hidden while searching.
+- **Subfolder search:** `rebuild_view -> sync_deep` compares a key (filter/opts/exclude/hidden) and (re)starts the
+  walker; dropping `DeepJob` cancels it. Results are appended to `entries` with `deep = true` and
+  `name` = relative path; `rebuild_view` shows only deep entries while deep search is active. `poll_deep` runs each
+  tick. `reload()` re-attaches `deep_res`. Exclude list is manual (`Store.exclude`, comma separated globs) –
+  nothing is excluded automatically (user decision). Deep results can't be inline-renamed; `Alt+Enter`
+  (`ShowInFolder`) goes to the containing folder with the cursor on the item.
+- **Background work:** file ops (`ops.rs`) and the deep walker run on threads and report via channels; the UI polls.
+  Directory reads on the UI thread are still synchronous (slow network/huge dirs can freeze – known, unfixed).
+- **FS watcher:** `notify` watches visible folders; events are debounced (200 ms calm / 1 s max); polling fallback
+  for unwatched dirs.
+- **Operations window** is a separate OS window (`show_viewport_immediate`), not an in-app panel.
+- Confirm dialogs (delete, F5/F6 transfer) focus the OK button; Enter on a focused button is left to egui.
+
+## Gotchas / workflow
+- Bash tool: heredocs with quotes or backslashes break or get mangled. For non-trivial edits write a script file
+  with the Write tool and run `python -I script.py`, or use Edit. A hook runs rustfmt after edits.
+- egui 0.37: `TextEdit::show(ui).response` is a `WidgetAtomResponse` – use `(*out.response).clone()` for an owned
+  `Response`. Use `use eframe::egui` in modules. `Id::new` is deprecated (warnings are expected, harmless).
+- Live testing: take window screenshots with PrintWindow of the exyex process only (never full-desktop – it can
+  capture the user's other windows). Back up and restore `%APPDATA%\exyex\state.json` around tests. If you add temporary
+  demo/env hooks, remove them afterwards (grep for `DEMO`).
+- Tested live so far: single-instance forwarding, fs watcher, operations window, search modes rendering. Only compiled
+  (not exercised): installer, tab drag/drop, slow-click rename, context menus, Right-arrow path autocomplete,
+  subfolder search UI, Alt+Enter.
+
+## Ideas offered but not done
+Async directory loading (fixes busy cursor), "Open in exyex" Explorer context menu, remembering the operations
+window size/position, tab reordering by drag within a pane, WinSCP/SFTP (via Pageant; phased plan discussed), first
+git commit.

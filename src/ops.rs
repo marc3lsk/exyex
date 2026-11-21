@@ -3,10 +3,12 @@
 use eframe::egui;
 use std::{
     fs,
+    io::{Read, Write},
+    time::{Duration, Instant},
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{Receiver, Sender, channel},
     },
 };
@@ -35,27 +37,63 @@ pub enum Msg {
     Done(Result<(), String>),
 }
 
+#[derive(Clone, PartialEq)]
+pub enum JobState {
+    Running,
+    Done,
+    Cancelled,
+    Failed(String),
+}
+
 pub struct Job {
+    pub id: u64,
     pub kind: OpKind,
+    /// e.g. "Copying 5 items"
+    pub title: String,
     pub rx: Receiver<Msg>,
     pub cancel: Arc<AtomicBool>,
+    pub cancelling: bool,
     pub done: u64,
     pub total: u64,
     pub current: String,
     pub dest: Option<PathBuf>,
+    pub started: Instant,
+    pub finished: Option<Instant>,
+    pub state: JobState,
 }
+
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 pub fn spawn(kind: OpKind, srcs: Vec<PathBuf>, dest: Option<PathBuf>, ctx: egui::Context) -> Job {
     let (tx, rx) = channel();
     let cancel = Arc::new(AtomicBool::new(false));
     let c2 = cancel.clone();
     let d2 = dest.clone();
+    let what = match srcs.as_slice() {
+        [one] => one.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+        many => format!("{} items", many.len()),
+    };
+    let title = format!("{} {}", kind.verb(), what);
     std::thread::spawn(move || {
         let r = run(kind, &srcs, d2.as_deref(), &tx, &c2, &ctx);
         let _ = tx.send(Msg::Done(r));
         ctx.request_repaint();
     });
-    Job { kind, rx, cancel, done: 0, total: 0, current: String::new(), dest }
+    Job {
+        id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+        kind,
+        title,
+        rx,
+        cancel,
+        cancelling: false,
+        done: 0,
+        total: 0,
+        current: String::new(),
+        dest,
+        started: Instant::now(),
+        finished: None,
+        state: JobState::Running,
+    }
 }
 
 struct Progress<'a> {
@@ -63,17 +101,31 @@ struct Progress<'a> {
     ctx: &'a egui::Context,
     done: u64,
     total: u64,
+    last: Instant,
 }
 
 impl Progress<'_> {
-    fn advance(&mut self, n: u64, current: &Path) {
-        self.done += n;
+    fn send(&mut self, current: &Path) {
+        self.last = Instant::now();
         let _ = self.tx.send(Msg::Progress {
             done: self.done,
             total: self.total,
             current: current.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
         });
         self.ctx.request_repaint();
+    }
+
+    fn advance(&mut self, n: u64, current: &Path) {
+        self.done += n;
+        self.send(current);
+    }
+
+    /// Progress inside a big file: reported at most every 100 ms.
+    fn advance_chunk(&mut self, n: u64, current: &Path) {
+        self.done += n;
+        if self.last.elapsed() >= Duration::from_millis(100) {
+            self.send(current);
+        }
     }
 }
 
@@ -118,7 +170,7 @@ fn run(
             trash::delete_all(srcs).map_err(|e| e.to_string())?;
         }
         OpKind::Delete => {
-            let mut pr = Progress { tx, ctx, done: 0, total: srcs.len() as u64 };
+            let mut pr = Progress { tx, ctx, done: 0, total: srcs.len() as u64, last: Instant::now() };
             for s in srcs {
                 if cancel.load(Ordering::Relaxed) {
                     return Err("Cancelled".into());
@@ -136,7 +188,7 @@ fn run(
         }
         OpKind::Copy | OpKind::Move => {
             let dest = dest.ok_or("no destination")?;
-            let mut pr = Progress { tx, ctx, done: 0, total: srcs.iter().map(|s| tree_size(s)).sum() };
+            let mut pr = Progress { tx, ctx, done: 0, total: srcs.iter().map(|s| tree_size(s)).sum(), last: Instant::now() };
             for s in srcs {
                 if cancel.load(Ordering::Relaxed) {
                     return Err("Cancelled".into());
@@ -169,6 +221,9 @@ fn run(
             }
         }
     }
+    if cancel.load(Ordering::Relaxed) {
+        return Err("Cancelled".into());
+    }
     if errors.is_empty() {
         Ok(())
     } else {
@@ -197,8 +252,136 @@ fn copy_tree(src: &Path, dst: &Path, pr: &mut Progress, cancel: &AtomicBool) -> 
         }
         pr.advance(1, src);
     } else {
-        fs::copy(src, dst).map_err(|e| e.to_string())?;
-        pr.advance(md.len().max(1), src);
+        copy_file(src, dst, md.len(), pr, cancel)?;
     }
     Ok(())
+}
+
+/// Small files use the OS copy; big ones are copied in 1 MiB chunks so the
+/// progress window moves and Cancel reacts quickly.
+fn copy_file(src: &Path, dst: &Path, len: u64, pr: &mut Progress, cancel: &AtomicBool) -> Result<(), String> {
+    const BIG: u64 = 16 * 1024 * 1024;
+    if len < BIG {
+        fs::copy(src, dst).map_err(|e| e.to_string())?;
+        pr.advance(len.max(1), src);
+        return Ok(());
+    }
+    let mut input = fs::File::open(src).map_err(|e| e.to_string())?;
+    let mut output = fs::File::create(dst).map_err(|e| e.to_string())?;
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            drop(output);
+            let _ = fs::remove_file(dst);
+            return Err("Cancelled".into());
+        }
+        let n = match input.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) => {
+                drop(output);
+                let _ = fs::remove_file(dst);
+                return Err(e.to_string());
+            }
+        };
+        if let Err(e) = output.write_all(&buf[..n]) {
+            drop(output);
+            let _ = fs::remove_file(dst);
+            return Err(e.to_string());
+        }
+        pr.advance_chunk(n as u64, src);
+    }
+    if let Ok(t) = input.metadata().and_then(|m| m.modified()) {
+        let _ = output.set_modified(t); // keep the original modification time
+    }
+    pr.send(src);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn temp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("exyex-test-{}-{}", std::process::id(), name));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn wait(job: &Job) -> (Result<(), String>, u64) {
+        let mut last_done = 0;
+        loop {
+            match job.rx.recv_timeout(Duration::from_secs(60)).expect("job timed out") {
+                Msg::Progress { done, .. } => last_done = done,
+                Msg::Done(r) => return (r, last_done),
+            }
+        }
+    }
+
+    #[test]
+    fn big_file_is_copied_in_chunks_with_progress_and_mtime() {
+        let dir = temp("big");
+        let src = dir.join("big.bin");
+        let data: Vec<u8> = (0..20 * 1024 * 1024u32).map(|i| (i % 251) as u8).collect();
+        fs::write(&src, &data).unwrap();
+        let old = std::time::SystemTime::now() - Duration::from_secs(86_400 * 30);
+        fs::File::options().write(true).open(&src).unwrap().set_modified(old).unwrap();
+        let dest = dir.join("out");
+        fs::create_dir_all(&dest).unwrap();
+
+        let job = spawn(OpKind::Copy, vec![src.clone()], Some(dest.clone()), egui::Context::default());
+        let (r, last_done) = wait(&job);
+        assert_eq!(r, Ok(()));
+        assert_eq!(last_done, data.len() as u64, "progress should reach the full size");
+        let copied = dest.join("big.bin");
+        assert_eq!(fs::read(&copied).unwrap(), data);
+        let m = fs::metadata(&copied).unwrap().modified().unwrap();
+        let diff = m.duration_since(old).unwrap_or_else(|e| e.duration());
+        assert!(diff < Duration::from_secs(3), "modification time should be preserved");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cancelled_chunked_copy_leaves_no_partial_file() {
+        let dir = temp("cancel");
+        let src = dir.join("big.bin");
+        fs::write(&src, vec![7u8; 20 * 1024 * 1024]).unwrap();
+        let dst = dir.join("copy.bin");
+        let (tx, _rx) = channel();
+        let ctx = egui::Context::default();
+        let mut pr = Progress { tx: &tx, ctx: &ctx, done: 0, total: 1, last: Instant::now() };
+        let cancel = AtomicBool::new(true);
+        let r = copy_file(&src, &dst, 20 * 1024 * 1024, &mut pr, &cancel);
+        assert_eq!(r, Err("Cancelled".to_string()));
+        assert!(!dst.exists(), "partial file must be removed");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn name_conflicts_get_a_number_and_folders_copy_recursively() {
+        let dir = temp("tree");
+        let src = dir.join("a");
+        fs::create_dir_all(src.join("sub")).unwrap();
+        fs::write(src.join("sub").join("f.txt"), "hi").unwrap();
+        let dest = dir.join("dest");
+        fs::create_dir_all(dest.join("a")).unwrap(); // conflict
+        let job = spawn(OpKind::Copy, vec![src.clone()], Some(dest.clone()), egui::Context::default());
+        assert_eq!(wait(&job).0, Ok(()));
+        assert_eq!(fs::read_to_string(dest.join("a (2)").join("sub").join("f.txt")).unwrap(), "hi");
+        assert_eq!(job.title, "Copying a");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_job_reports_progress_and_removes() {
+        let dir = temp("del");
+        let f = dir.join("x.txt");
+        fs::write(&f, "x").unwrap();
+        let job = spawn(OpKind::Delete, vec![f.clone()], None, egui::Context::default());
+        assert_eq!(wait(&job).0, Ok(()));
+        assert!(!f.exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
