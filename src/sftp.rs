@@ -151,6 +151,17 @@ fn label_of(l: &Loc) -> String {
     alias_of(l).unwrap_or_else(|| format!("{}@{}", l.user, l.host))
 }
 
+/// Breadcrumb label of the server segment: `alias (user@host)` or just `user@host`.
+pub fn crumb_label(p: &Path) -> Option<String> {
+    let l = parse(p)?;
+    let port = if l.port == 22 { String::new() } else { format!(":{}", l.port) };
+    let plain = format!("{}@{}{port}", l.user, l.host);
+    Some(match alias_of(&l) {
+        Some(a) => format!("{a} ({plain})"),
+        None => plain,
+    })
+}
+
 /// Tab title for a connection root / home folder.
 pub fn title(p: &Path) -> Option<String> {
     let l = parse(p)?;

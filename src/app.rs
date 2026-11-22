@@ -786,6 +786,8 @@ impl App {
             NewTab => {
                 let p = self.tab().path.clone();
                 self.open_new_tab(pi, p);
+                // start typing right away: the path bar opens with favorites and recents
+                self.run(ctx, EditPath);
             }
             CloseTab => {
                 let pane = &mut self.panes[pi];
@@ -2692,13 +2694,20 @@ fn chip(ui: &mut Ui, text: &str, selected: bool, color: Option<Color32>) -> egui
 fn breadcrumbs(ui: &mut Ui, path: &Path, pi: usize, evs: &mut Vec<Ev>) {
     let mut crumbs: Vec<(String, PathBuf)> = vec![];
     let mut acc = PathBuf::new();
+    let remote = crate::sftp::is_remote(path);
     for c in path.components() {
         acc.push(c.as_os_str());
-        let label = match c {
+        let mut label = match c {
             std::path::Component::Prefix(p) => p.as_os_str().to_string_lossy().into_owned(),
             std::path::Component::RootDir => continue,
             c => c.as_os_str().to_string_lossy().into_owned(),
         };
+        if remote && crumbs.len() == 1 {
+            // the server segment always shows its alias
+            if let Some(l) = crate::sftp::crumb_label(path) {
+                label = l;
+            }
+        }
         let target = if matches!(c, std::path::Component::Prefix(_)) { PathBuf::from(format!("{}\\", acc.display())) } else { acc.clone() };
         crumbs.push((label, target));
     }
