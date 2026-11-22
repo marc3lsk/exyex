@@ -46,6 +46,7 @@ The **Subfolders** chip searches the whole tree below the current folder, in the
 show the path relative to the folder (`src\ui\README.md`). The query is matched against that relative path.
 Enter opens a file, or goes into a folder. The count shows `…` while running and `+ (limit)` after 50 000 results.
 **Alt+Enter** (or right-click → *Open containing folder*) jumps to the folder of the selected result with the cursor on that file.
+Renaming a result (F2) keeps it in the list even if the new name no longer matches the query.
 Reparse points / symlinks are not followed, hidden items follow the "show hidden" setting.
 
 A manual **exclude** box appears next to the chip: names or wildcards separated by commas, e.g.
@@ -100,6 +101,9 @@ handled by exyex). **Ctrl+Shift+K** (or palette → *Connect to SFTP server*) op
 - **Ctrl+M – compare panes:** marks items by name against the other pane: green = only here, orange = newer here,
   red = older here, purple = different size. **Ctrl+Shift+M** selects what is missing/newer/different here;
   **Alt+Shift+S** does that and opens the copy dialog (one-way sync to the other pane). Folders are compared by existence.
+- **Ctrl+Shift+D – text compare:** side-by-side diff of two text files in its own window: select two files in one pane, or put the cursor on a
+  file in each pane. Changed lines are paired and the changed characters highlighted; **F7 / F8** jump to the previous / next
+  difference, checkboxes ignore whitespace / case, Esc closes. Works on local, SFTP and zip-inner files (text only, up to 4 MB).
 - **Zip / jar as folders:** Enter on a `.zip` browses it (path bar, search and subfolder search work inside).
   Archives are read-only; copy (F5, drag, clipboard) extracts, Enter on a file inside opens a temp copy.
 - **Tabs:** drag a tab left/right inside its strip to reorder (the blue mark shows where it lands).

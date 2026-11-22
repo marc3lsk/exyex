@@ -15,6 +15,7 @@ mod search;
 mod sftp;
 mod single;
 mod store;
+mod textdiff;
 mod thumbs;
 
 fn main() -> eframe::Result {

@@ -131,6 +131,9 @@ pub struct Store {
     /// SFTP connection aliases: `user@host:port` -> short name.
     #[serde(default)]
     pub aliases: HashMap<String, String>,
+    /// Theme of the text-compare window (`None` = same as the main window).
+    #[serde(default)]
+    pub diff_dark: Option<bool>,
     #[serde(default)]
     pub view: ViewMode,
     #[serde(default)]

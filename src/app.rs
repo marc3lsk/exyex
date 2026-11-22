@@ -163,6 +163,7 @@ pub struct App {
     preview: bool,
     pv: crate::preview::Previewer,
     compare: bool,
+    textdiff: Option<crate::textdiff::TextDiff>,
     diff: [HashMap<String, Diff>; 2],
     typeahead: (String, Instant),
     drives: Vec<PathBuf>,
@@ -343,6 +344,7 @@ impl App {
             preview: false,
             pv: Default::default(),
             compare: false,
+            textdiff: None,
             diff: [HashMap::new(), HashMap::new()],
             typeahead: (String::new(), Instant::now()),
             drives: list_drives(),
@@ -650,6 +652,9 @@ impl App {
         self.sync_watches();
         self.apply_fs_events(ctx);
         self.refresh_diff();
+        if self.compare && same_content_pending() {
+            ctx.request_repaint_after(Duration::from_millis(250));
+        }
         while let Ok(r) = self.sftp_open_rx.try_recv() {
             match r {
                 Ok(tmp) => {
@@ -915,6 +920,24 @@ impl App {
                 self.navigate(pi, PathBuf::from("sftp:"));
             }
             QuickLook => self.preview = !self.preview,
+            TextCompare => {
+                let is_file = |t: &crate::model::Tab, p: &PathBuf| t.entries.iter().find(|e| &e.path == p).is_some_and(|e| !e.is_dir && !e.is_up);
+                let t = self.tab();
+                let sel = t.targets();
+                let pair = if sel.len() == 2 {
+                    Some((sel[0].clone(), sel[1].clone())).filter(|(a, b)| is_file(t, a) && is_file(t, b))
+                } else {
+                    let o = self.panes[self.other()].tab();
+                    match (t.current(), o.current()) {
+                        (Some(a), Some(b)) if !a.is_dir && !a.is_up && !b.is_dir && !b.is_up => Some((a.path.clone(), b.path.clone())),
+                        _ => None,
+                    }
+                };
+                match pair {
+                    Some((a, b)) => self.textdiff = Some(crate::textdiff::TextDiff::open(ctx, a, b, self.store.diff_dark.unwrap_or_else(|| ctx.global_style().visuals.dark_mode))),
+                    None => self.say("Select two files (or put the cursor on a file in both panes) to compare"),
+                }
+            }
             ViewCycle | ViewDetails | ViewCompact | ViewGrid => {
                 self.store.view = match a {
                     ViewDetails => ViewMode::Details,
@@ -1142,12 +1165,12 @@ impl App {
 
     fn start_inline(&mut self, pi: usize) {
         let tab = self.panes[pi].tab();
-        let Some(e) = tab.current().filter(|e| !e.is_up && !e.deep && !crate::archive::in_archive(&e.path)) else { return };
+        let Some(e) = tab.current().filter(|e| !e.is_up && !crate::archive::in_archive(&e.path)) else { return };
         self.inline = Some(InlineRename {
             pi,
             dir: tab.path.clone(),
             path: e.path.clone(),
-            text: e.name.clone(),
+            text: e.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| e.name.clone()),
             fresh: true,
             seen_focus: false,
             commit: false,
@@ -1185,11 +1208,12 @@ impl App {
         match renamed {
             Ok(()) => {
                 self.say(format!("Renamed to {new_name}"));
+                let focus = self.tab_mut().note_rename(path, &target);
                 for p in &mut self.panes {
                     p.tab_mut().selected.clear();
                     p.tab_mut().reload(None);
                 }
-                self.tab_mut().reload(Some(new_name.to_string()));
+                self.tab_mut().reload(Some(focus));
             }
             Err(e) => self.say(format!("⚠ Rename failed: {e}")),
         }
@@ -2417,6 +2441,59 @@ impl Diff {
     }
 }
 
+fn is_local(p: &Path) -> bool {
+    !crate::sftp::is_remote(p) && crate::archive::split(p).is_none()
+}
+
+type ContentKey = (PathBuf, PathBuf, Option<std::time::SystemTime>, Option<std::time::SystemTime>);
+/// Results of byte-for-byte comparisons: `None` = still running.
+static CONTENT: std::sync::LazyLock<std::sync::Mutex<HashMap<ContentKey, Option<bool>>>> = std::sync::LazyLock::new(Default::default);
+
+fn bytes_equal(a: &Path, b: &Path) -> bool {
+    use std::io::Read;
+    let (Ok(mut fa), Ok(mut fb)) = (std::fs::File::open(a), std::fs::File::open(b)) else { return false };
+    let (Ok(ma), Ok(mb)) = (fa.metadata(), fb.metadata()) else { return false };
+    if ma.len() != mb.len() {
+        return false;
+    }
+    let mut left = ma.len();
+    let (mut ba, mut bb) = (vec![0u8; 64 * 1024], vec![0u8; 64 * 1024]);
+    while left > 0 {
+        let n = left.min(ba.len() as u64) as usize;
+        if fa.read_exact(&mut ba[..n]).is_err() || fb.read_exact(&mut bb[..n]).is_err() || ba[..n] != bb[..n] {
+            return false;
+        }
+        left -= n as u64;
+    }
+    true
+}
+
+/// Whether two local files of equal size have identical bytes. Computed on a background
+/// thread; `None` while that is pending (or for non-local files, which are never read here).
+fn same_content(a: &Entry, b: &Entry) -> Option<bool> {
+    if a.is_dir || b.is_dir || !is_local(&a.path) || !is_local(&b.path) {
+        return None;
+    }
+    let key = (a.path.clone(), b.path.clone(), a.modified, b.modified);
+    let mut map = CONTENT.lock().ok()?;
+    if let Some(r) = map.get(&key) {
+        return *r;
+    }
+    map.insert(key.clone(), None);
+    drop(map);
+    std::thread::spawn(move || {
+        let r = bytes_equal(&key.0, &key.1);
+        if let Ok(mut m) = CONTENT.lock() {
+            m.insert(key, Some(r));
+        }
+    });
+    None
+}
+
+fn same_content_pending() -> bool {
+    CONTENT.lock().is_ok_and(|m| m.values().any(|v| v.is_none()))
+}
+
 /// How the items of `a` differ from the folder shown in `b` (by name; same items are left out).
 fn diff_map(a: &Tab, b: &Tab) -> HashMap<String, Diff> {
     let other: HashMap<String, &Entry> = b.entries.iter().filter(|e| !e.is_up && !e.deep).map(|e| (e.name.to_lowercase(), e)).collect();
@@ -2428,9 +2505,12 @@ fn diff_map(a: &Tab, b: &Tab) -> HashMap<String, Diff> {
             Some(o) if o.is_dir || e.is_dir => None,
             Some(o) => {
                 let slack = Duration::from_secs(2);
+                // Same size but different dates: only a real difference if the bytes differ
+                // (it is not marked while that check still runs; remote / archive files keep the date rule).
+                let differs = |newer: bool| if e.size == o.size && is_local(&e.path) && is_local(&o.path) { same_content(e, o) == Some(false) } else { newer };
                 match (e.modified, o.modified) {
-                    (Some(x), Some(y)) if x > y + slack => Some(Diff::Newer),
-                    (Some(x), Some(y)) if y > x + slack => Some(Diff::Older),
+                    (Some(x), Some(y)) if x > y + slack => differs(true).then_some(Diff::Newer),
+                    (Some(x), Some(y)) if y > x + slack => differs(true).then_some(Diff::Older),
                     _ if e.size != o.size => Some(Diff::Size),
                     _ => None,
                 }
@@ -3151,6 +3231,16 @@ impl eframe::App for App {
         self.ui_palette(&ctx);
         self.ui_dialog(&ctx);
         self.ui_jobs(&ctx);
+        if let Some(td) = &mut self.textdiff {
+            let keep = td.ui(&ctx);
+            if td.touched && self.store.diff_dark != Some(td.dark) {
+                self.store.diff_dark = Some(td.dark);
+                self.dirty = true;
+            }
+            if !keep {
+                self.textdiff = None;
+            }
+        }
         if self.quit {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }

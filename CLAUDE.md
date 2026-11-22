@@ -42,7 +42,7 @@ to change the code safely. The user writes Slovak; answer in Slovak, keep code/c
   walker; dropping `DeepJob` cancels it. Results are appended to `entries` with `deep = true` and
   `name` = relative path; `rebuild_view` shows only deep entries while deep search is active. `poll_deep` runs each
   tick. `reload()` re-attaches `deep_res`. Exclude list is manual (`Store.exclude`, comma separated globs) –
-  nothing is excluded automatically (user decision). Deep results can't be inline-renamed; `Alt+Enter`
+  nothing is excluded automatically (user decision). Deep results can be renamed inline (`Tab::note_rename` keeps the renamed item in `Tab.kept` so it stays listed until the query/folder changes); `Alt+Enter`
   (`ShowInFolder`) goes to the containing folder with the cursor on the item.
 - **Background work:** file ops (`ops.rs`) and the deep walker run on threads and report via channels; the UI polls.
   Directory reads on the UI thread are still synchronous (slow network/huge dirs can freeze – known, unfixed).

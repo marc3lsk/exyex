@@ -256,6 +256,9 @@ pub struct Tab {
     pub deep_res: Vec<Entry>,
     pub deep_job: Option<crate::deep::DeepJob>,
     deep_key: String,
+    /// Renamed results that stay listed although they no longer match the search.
+    kept: HashSet<PathBuf>,
+    kept_key: String,
     pub sort: SortKey,
     pub asc: bool,
     pub show_hidden: bool,
@@ -315,6 +318,8 @@ impl Tab {
             deep_res: vec![],
             deep_job: None,
             deep_key: String::new(),
+            kept: HashSet::new(),
+            kept_key: String::new(),
             sort: SortKey::Name,
             asc: true,
             show_hidden,
@@ -389,11 +394,23 @@ impl Tab {
         let deep = self.deep_active();
         let content = deep && self.search.content;
         let ranked = self.matcher.ranked() && !content;
+        // results the user renamed stay listed until the query / folder changes
+        let kept_key = format!("{}|{:?}|{}", self.filter, self.search, self.path.display());
+        if kept_key != self.kept_key {
+            self.kept.clear();
+            self.kept_key = kept_key;
+        }
+        let kept = &self.kept;
         let mut scored: Vec<(i32, usize)> = (0..self.entries.len())
             .filter(|&i| !self.entries[i].is_up && self.entries[i].deep == deep && (self.show_hidden || !self.entries[i].hidden))
-            .filter(|&i| self.matcher.filters_ok(&self.entries[i]))
             .filter_map(|i| {
                 let e = &self.entries[i];
+                if kept.contains(&e.path) {
+                    return Some((0, i));
+                }
+                if !self.matcher.filters_ok(e) {
+                    return None;
+                }
                 if content && e.deep {
                     return Some((0, i)); // the walker already matched the file contents
                 }
@@ -492,11 +509,40 @@ impl Tab {
         }
         let running = job.running;
         if !got.is_empty() {
+            let known: HashSet<&PathBuf> = self.deep_res.iter().map(|e| &e.path).collect();
+            got.retain(|e| !known.contains(&e.path)); // a renamed result may be found again
+        }
+        if !got.is_empty() {
             self.deep_res.extend(got.iter().cloned());
             self.entries.extend(got);
             self.rebuild_view(None);
         }
         running
+    }
+
+    /// A file or folder of this tab was renamed: keep it in the (search) results even if
+    /// the new name no longer matches. Returns the name the entry has in the list.
+    pub fn note_rename(&mut self, old: &Path, new: &Path) -> String {
+        let base = self.path.clone();
+        let rel = |p: &Path| p.strip_prefix(&base).map(|r| r.to_string_lossy().into_owned()).ok();
+        for e in self.deep_res.iter_mut().filter(|e| e.path.starts_with(old)) {
+            let moved = match e.path.strip_prefix(old) {
+                Ok(rest) if rest.as_os_str().is_empty() => new.to_path_buf(),
+                Ok(rest) => new.join(rest),
+                Err(_) => continue,
+            };
+            if let Some(r) = rel(&moved) {
+                e.name = r;
+            }
+            if e.path == old {
+                if let Some(f) = new.file_name() {
+                    e.ext = if e.is_dir { String::new() } else { Path::new(f).extension().map(|x| x.to_string_lossy().to_lowercase()).unwrap_or_default() };
+                }
+            }
+            e.path = moved;
+        }
+        self.kept.insert(new.to_path_buf());
+        self.deep_res.iter().find(|e| e.path == new).map(|e| e.name.clone()).unwrap_or_else(|| new.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default())
     }
 
     pub fn set_sort(&mut self, key: SortKey) {
@@ -790,5 +836,34 @@ pub fn fmt_time(t: Option<SystemTime>) -> String {
     match t {
         Some(t) => chrono::DateTime::<chrono::Local>::from(t).format("%Y-%m-%d %H:%M").to_string(),
         None => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod rename_tests {
+    use super::*;
+
+    #[test]
+    fn renamed_result_stays_in_the_filtered_list() {
+        let root = std::env::temp_dir().join(format!("exyex-ren-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("report.txt"), "x").unwrap();
+        std::fs::write(root.join("other.txt"), "x").unwrap();
+        let mut t = Tab::new(root.clone(), false);
+        t.filter = "report".into();
+        t.rebuild_view(None);
+        assert_eq!(t.view.len(), 1);
+        let (old, new) = (root.join("report.txt"), root.join("final.txt"));
+        std::fs::rename(&old, &new).unwrap();
+        let name = t.note_rename(&old, &new);
+        t.reload(Some(name));
+        assert_eq!(t.view.len(), 1, "renamed file must stay listed");
+        assert_eq!(t.current().unwrap().name, "final.txt");
+        t.filter = "other".into(); // a new query forgets it
+        t.rebuild_view(None);
+        assert_eq!(t.view.len(), 1);
+        assert_eq!(t.current().unwrap().name, "other.txt");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

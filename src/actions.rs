@@ -65,6 +65,7 @@ pub enum Action {
     CompareToggle,
     SelectDiff,
     SyncToOther,
+    TextCompare,
     Root,
     ExplorerHere,
     PowerShellHere,
@@ -84,7 +85,7 @@ pub const PALETTE_ACTIONS: &[Action] = &[
     FolderJump, Copy, Move, Rename, Delete, DeletePermanent, NewFolder, NewFile, ClipCopy, ClipCut, ClipPaste,
     CopyPath, CopyFolderPath, NewTab, CloseTab, CloseOtherTabs, CloseTabsLeft, CloseTabsRight, ReopenTab, NextTab, PrevTab, SwitchPane, SwapPanes, MirrorToOther, Up, Back,
     Forward, Open, OpenInNewTab, Refresh, EditPath, Filter, SelectAll, SelectNone, InvertSelection, ToggleSelect,
-    ToggleHidden, SortName, SortExt, SortSize, SortDate, ToggleFavorite, Reveal, ShowInFolder, ConnectSftp, SftpAlias, FavoriteItem, SftpRoot, ViewCycle, ViewDetails, ViewCompact, ViewGrid, ColExt, ColSize, ColDate, QuickLook, CompareToggle, SelectDiff, SyncToOther, Root, ExplorerHere, Terminal, PowerShellHere, CmdHere, ThemeCycle, ThemeSystem, ThemeLight, ThemeDark, Quit,
+    ToggleHidden, SortName, SortExt, SortSize, SortDate, ToggleFavorite, Reveal, ShowInFolder, ConnectSftp, SftpAlias, FavoriteItem, SftpRoot, ViewCycle, ViewDetails, ViewCompact, ViewGrid, ColExt, ColSize, ColDate, QuickLook, CompareToggle, SelectDiff, SyncToOther, TextCompare, Root, ExplorerHere, Terminal, PowerShellHere, CmdHere, ThemeCycle, ThemeSystem, ThemeLight, ThemeDark, Quit,
 ];
 
 pub fn name(a: Action) -> &'static str {
@@ -119,6 +120,7 @@ pub fn name(a: Action) -> &'static str {
         CompareToggle => "Compare panes: mark differences",
         SelectDiff => "Select items that differ from the other pane",
         SyncToOther => "Sync: copy differing items to the other pane",
+        TextCompare => "Compare files: text diff (2 selected, or cursor in both panes)",
         Back => "Back",
         Forward => "Forward",
         Open => "Open",
@@ -178,6 +180,7 @@ pub fn bindings() -> Vec<Binding> {
     let cs = c.plus(s);
     let b = |mods, key, action| Binding { mods, key, action };
     vec![
+        b(cs, Key::D, TextCompare),
         b(cs, Key::T, ReopenTab),
         b(cs, Key::Tab, PrevTab),
         b(cs, Key::C, CopyPath),
