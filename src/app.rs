@@ -67,7 +67,7 @@ enum Dialog {
     /// F5 / F6: confirm copying or moving the selection to the other pane.
     Transfer { kind: OpKind, paths: Vec<PathBuf>, dest: PathBuf },
     /// Copy / move where some targets already exist: asks about the first of `queue`, then the next, ...
-    Conflict { kind: OpKind, srcs: Vec<PathBuf>, dest: PathBuf, queue: Vec<PathBuf>, chosen: HashMap<PathBuf, ops::Policy>, all: bool },
+    Conflict { kind: OpKind, srcs: Vec<PathBuf>, dest: PathBuf, queue: Vec<PathBuf>, chosen: HashMap<PathBuf, ops::Policy>, all: bool, existing: Vec<Entry> },
 }
 
 /// In-place rename editor shown inside a file-list row.
@@ -122,6 +122,8 @@ enum TabCmd {
 
 enum Ev {
     Click { pi: usize, vi: usize, ctrl: bool, shift: bool },
+    /// Re-read the folder of one pane (refresh button).
+    Reload(usize),
     Open { pi: usize, vi: usize },
     MiddleOpen { pi: usize, vi: usize },
     ContextAt { pi: usize, vi: usize },
@@ -490,21 +492,28 @@ impl App {
             return;
         }
         if let (OpKind::Copy | OpKind::Move, Some(d)) = (kind, dest.as_ref()) {
-            // local targets only: remote / archive folders keep "keep both"
-            if !crate::sftp::is_remote(d) && !crate::archive::in_archive(d) {
-                let queue: Vec<PathBuf> = srcs
-                    .iter()
-                    .filter(|s| {
-                        let Some(n) = s.file_name() else { return false };
+            let virtual_dest = crate::sftp::is_remote(d) || crate::archive::in_archive(d);
+            // remote / archive folders are listed once; local ones are probed name by name
+            let existing: Vec<Entry> = if virtual_dest { crate::model::read_dir(d).unwrap_or_default() } else { vec![] };
+            let queue: Vec<PathBuf> = srcs
+                .iter()
+                .filter(|s| {
+                    let Some(n) = s.file_name() else { return false };
+                    if kind == OpKind::Move && s.parent() == Some(d.as_path()) {
+                        return false;
+                    }
+                    if virtual_dest {
+                        existing.iter().any(|e| !e.is_up && std::ffi::OsStr::new(&e.name) == n)
+                    } else {
                         let t = d.join(n);
-                        t.exists() && t != **s && !(kind == OpKind::Move && s.parent() == Some(d.as_path()))
-                    })
-                    .cloned()
-                    .collect();
-                if !queue.is_empty() {
-                    self.dialog = Some(Dialog::Conflict { kind, srcs, dest: d.clone(), queue, chosen: HashMap::new(), all: false });
-                    return;
-                }
+                        t.exists() && t != **s
+                    }
+                })
+                .cloned()
+                .collect();
+            if !queue.is_empty() {
+                self.dialog = Some(Dialog::Conflict { kind, srcs, dest: d.clone(), queue, chosen: HashMap::new(), all: false, existing });
+                return;
             }
         }
         self.spawn_op(ctx, kind, srcs, dest, HashMap::new());
@@ -1938,12 +1947,13 @@ impl App {
                             }
                         }
                     }
-                    Dialog::Conflict { dest, queue, all, .. } => {
+                    Dialog::Conflict { dest, queue, all, existing, .. } => {
                         let src = queue[0].clone();
                         let name = src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                         ui.label(format!("\"{name}\" already exists in:"));
                         ui.label(egui::RichText::new(dest.display().to_string()).strong());
                         ui.add_space(4.0);
+                        let remote_dest = crate::sftp::is_remote(dest);
                         let info = |p: &Path| match std::fs::metadata(p) {
                             Ok(m) if m.is_dir() => format!("folder, {}", crate::model::fmt_time(m.modified().ok())),
                             Ok(m) => format!("{}, {}", crate::model::fmt_size(m.len()), crate::model::fmt_time(m.modified().ok())),
@@ -1951,7 +1961,11 @@ impl App {
                         };
                         egui::Grid::new("conflict_info").num_columns(2).spacing([10.0, 2.0]).show(ui, |ui| {
                             ui.weak("Existing:");
-                            ui.label(info(&dest.join(&name)));
+                            ui.label(match existing.iter().find(|e| e.name == name) {
+                                Some(e) if e.is_dir => format!("folder, {}", crate::model::fmt_time(e.modified)),
+                                Some(e) => format!("{}, {}", crate::model::fmt_size(e.size), crate::model::fmt_time(e.modified)),
+                                None => info(&dest.join(&name)),
+                            });
                             ui.end_row();
                             ui.weak("New:");
                             ui.label(info(&src));
@@ -1972,7 +1986,7 @@ impl App {
                             if ui.button("Skip").clicked() {
                                 conflict_choice = Some(ops::Policy::Skip);
                             }
-                            if ui.button("Overwrite if newer").on_hover_text("Replace only when the new file is newer").clicked() {
+                            if !remote_dest && ui.button("Overwrite if newer").on_hover_text("Replace only when the new file is newer").clicked() {
                                 conflict_choice = Some(ops::Policy::Newer);
                             }
                             if ui.button("Cancel").clicked() {
@@ -2023,7 +2037,7 @@ impl App {
             });
 
         if let (Some(policy), Dialog::Conflict { .. }) = (conflict_choice, &dlg) {
-            let Dialog::Conflict { kind, srcs, dest, mut queue, mut chosen, all } = dlg else { unreachable!() };
+            let Dialog::Conflict { kind, srcs, dest, mut queue, mut chosen, all, existing } = dlg else { unreachable!() };
             if all {
                 for q in queue.drain(..) {
                     chosen.insert(q, policy);
@@ -2035,7 +2049,7 @@ impl App {
                 let ctx = ctx.clone();
                 self.spawn_op(&ctx, kind, srcs, Some(dest), chosen);
             } else {
-                self.dialog = Some(Dialog::Conflict { kind, srcs, dest, queue, chosen, all: false });
+                self.dialog = Some(Dialog::Conflict { kind, srcs, dest, queue, chosen, all: false, existing });
             }
             return;
         }
@@ -2338,6 +2352,9 @@ impl App {
             }
             if icon_btn(ui, Ico::Root, tab.path.parent().is_some(), "Root of drive (Ctrl+Backspace)").clicked() {
                 evs.push(Ev::Run(Action::Root));
+            }
+            if icon_btn(ui, Ico::Refresh, true, "Refresh (Ctrl+R)").clicked() {
+                evs.push(Ev::Reload(pi));
             }
             ui.add_space(4.0);
             egui::Frame::new()
@@ -3024,6 +3041,7 @@ enum Ico {
     Fwd,
     Up,
     Root,
+    Refresh,
     Plus,
     Close,
     Down,
@@ -3036,10 +3054,32 @@ fn paint_icon(p: &egui::Painter, c: Pos2, ico: Ico, col: Color32) {
         Ico::Fwd => &[[(-5.0, 0.0), (5.0, 0.0)], [(5.0, 0.0), (1.0, -4.0)], [(5.0, 0.0), (1.0, 4.0)]],
         Ico::Up => &[[(0.0, 5.0), (0.0, -5.0)], [(0.0, -5.0), (-4.0, -1.0)], [(0.0, -5.0), (4.0, -1.0)]],
         Ico::Root => &[[(-5.0, -5.0), (5.0, -5.0)], [(0.0, 5.0), (0.0, -3.0)], [(0.0, -3.0), (-3.5, 0.5)], [(0.0, -3.0), (3.5, 0.5)]],
+        Ico::Refresh => &[],
         Ico::Plus => &[[(-4.5, 0.0), (4.5, 0.0)], [(0.0, -4.5), (0.0, 4.5)]],
         Ico::Close => &[[(-3.0, -3.0), (3.0, 3.0)], [(-3.0, 3.0), (3.0, -3.0)]],
         Ico::Down => &[[(-4.0, -2.0), (0.0, 2.0)], [(0.0, 2.0), (4.0, -2.0)]],
     };
+    if ico == Ico::Refresh {
+        // open circle (clockwise, gap at the top right) ending in an arrow head
+        let r = 4.8_f32;
+        let (a0, sweep) = (-40.0_f32.to_radians(), 285.0_f32.to_radians());
+        let pt = |t: f32| c + vec2(r * t.cos(), r * t.sin());
+        let steps = 20;
+        let mut prev = pt(a0);
+        for i in 1..=steps {
+            let cur = pt(a0 + sweep * i as f32 / steps as f32);
+            p.line_segment([prev, cur], st);
+            prev = cur;
+        }
+        let end = a0 + sweep;
+        let tang = vec2(-end.sin(), end.cos()); // direction of travel
+        let tip = prev + tang * 2.2;
+        let rot = |v: egui::Vec2, ang: f32| vec2(v.x * ang.cos() - v.y * ang.sin(), v.x * ang.sin() + v.y * ang.cos());
+        for side in [-1.0_f32, 1.0] {
+            p.line_segment([tip, tip - rot(tang, side * 0.75) * 4.0], st);
+        }
+        return;
+    }
     for [a, b] in segs {
         let (pa, pb) = (c + vec2(a.0, a.1), c + vec2(b.0, b.1));
         p.line_segment([pa, pb], st);
@@ -3837,6 +3877,11 @@ impl App {
             Ev::TabRects(pi, r) => self.tab_rects[pi] = r,
             Ev::DropHover(p) => self.drop_hover = Some(p),
             Ev::Run(a) => self.run(ctx, a),
+            Ev::Reload(pi) => {
+                self.active = pi;
+                self.panes[pi].tab_mut().reload(None);
+                self.dirty = true;
+            }
         }
         // Close path editors that asked for it.
         for p in &mut self.panes {

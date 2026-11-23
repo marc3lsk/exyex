@@ -284,7 +284,17 @@ fn run(
                         continue;
                     }
                     let local_target = if rs { target_for(dest, s, name, policy) } else { None };
-                    if rs && local_target.is_none() {
+                    let up_target = if rs {
+                        None
+                    } else {
+                        match policy {
+                            Policy::Overwrite | Policy::Newer => Some(dest.join(name)),
+                            Policy::Skip if crate::sftp::exists(&dest.join(name)) => None,
+                            Policy::Skip => Some(dest.join(name)),
+                            Policy::Rename => Some(crate::sftp::unique_remote(dest, name)),
+                        }
+                    };
+                    if (rs && local_target.is_none()) || (!rs && up_target.is_none()) {
                         pr.advance(src_size(s), s); // skipped
                         continue;
                     }
@@ -295,7 +305,7 @@ fn run(
                             if kind == OpKind::Move { crate::sftp::remove_all(s).map_err(|e| format!("copied, but could not remove source: {e}")) } else { Ok(()) }
                         })
                     } else {
-                        let target = crate::sftp::unique_remote(dest, name);
+                        let target = up_target.unwrap();
                         crate::sftp::upload(s, &target, cancel, &mut sink).and_then(|_| {
                             if kind == OpKind::Move { remove_any(s).map_err(|e| format!("copied, but could not remove source: {e}")) } else { Ok(()) }
                         })
