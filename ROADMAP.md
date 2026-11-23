@@ -23,6 +23,9 @@ Legenda: ✅ hotové · 🟡 rozpracované / čiastočné · ⬜ nápad
 - ⬜ **Uložené hľadania.**
 
 ## Používanie
+- ✅ **Konfigurovateľný editor pre F4** – príkaz s `{file}` `{dir}` `{line}` + pravidlá podľa prípony (paleta → *Settings: editor for F4*); predvolene Notepad. F4 na priečinku otvorí úpravu cesty.
+- ✅ **Úprava obsahu zipu** – kopírovanie / presun dnu a von, mazanie, premenovanie, nový súbor / priečinok a F4 pracujú nad pracovnou kópiou; po opustení zipu (a pri ukončení) sa opýta, či zip aktualizovať.
+- ✅ **F4 na SFTP súboroch** – stiahne, otvorí editor a po každom uložení nahrá súbor späť na server.
 - ⬜ **Workspaces** – uložená sada tabov v oboch paneloch, prepínanie jedným príkazom.
 - ⬜ **Veľkosti priečinkov** v stĺpci Size (počítané na pozadí) + prehľad využitia disku.
 - ✅ **Iné zobrazenia** – Details / Compact / Grid s náhľadmi obrázkov, voliteľné stĺpce (Type, Size, Modified).
@@ -32,4 +35,4 @@ Legenda: ✅ hotové · 🟡 rozpracované / čiastočné · ⬜ nápad
 - ⬜ **Testy UI a integračné testy** (inštalátor, drag & drop, kontextové menu nie sú overené v praxi).
 - ⬜ **Lepšie chybové hlášky** (napr. „access denied" pri kopírovaní) namiesto krátkej správy v stavovom riadku.
 - ⬜ **Diagnostika** – logovací súbor a „copy debug info".
-- ⬜ **Rekurzia pre `rename` v hľadaní podpriečinkov** (teraz sa výsledky z podpriečinkov nedajú premenovať na mieste).
+- ✅ **Premenovanie vo výsledkoch hľadania** – premenovaná položka zostane v zozname aj keď už nevyhovuje dotazu.

@@ -479,6 +479,77 @@ pub fn rename(from: &Path, to: &Path) -> io::Result<()> {
     })
 }
 
+/// A user or group for `chown`: a name or a number, nothing the shell could interpret.
+fn valid_id(s: &str) -> bool {
+    s.len() <= 64 && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '$' | '@')) && !s.starts_with('-')
+}
+
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Changes the Linux owner / group of remote files by running `chown` over SSH (SFTP itself only knows numeric ids).
+/// `owner` and `group` may be empty (left unchanged), but not both. All paths must be on the same server.
+pub fn chown(paths: &[PathBuf], owner: &str, group: &str, recursive: bool, sudo: bool) -> Result<String, String> {
+    let (owner, group) = (owner.trim(), group.trim());
+    if owner.is_empty() && group.is_empty() {
+        return Err("enter an owner and/or a group".into());
+    }
+    if !(owner.is_empty() || valid_id(owner)) || !(group.is_empty() || valid_id(group)) {
+        return Err("owner / group may contain only letters, digits and _ - . $ @".into());
+    }
+    let first = paths.first().ok_or("nothing selected")?;
+    let l = loc_of(first).map_err(|e| e.to_string())?;
+    let mut locs = vec![];
+    for p in paths {
+        let pl = loc_of(p).map_err(|e| e.to_string())?;
+        if pl.key() != l.key() {
+            return Err("select items on one server only".into());
+        }
+        if pl.rest.is_empty() {
+            return Err("select a folder or file inside the server, not the connection itself".into());
+        }
+        locs.push(pl);
+    }
+    let spec = if group.is_empty() { owner.to_string() } else { format!("{owner}:{group}") };
+    run_on(&l, false, |c, home_rp| {
+        let (spec, locs) = (spec.clone(), locs.clone());
+        async move {
+            let _ = home_rp;
+            let mut cmd = String::new();
+            if sudo {
+                cmd.push_str("sudo -n ");
+            }
+            cmd.push_str("chown -h ");
+            if recursive {
+                cmd.push_str("-R ");
+            }
+            cmd.push_str(&format!("-- {}", sh_quote(&spec)));
+            for pl in &locs {
+                cmd.push(' ');
+                cmd.push_str(&sh_quote(&remote_path(pl, &c.home)));
+            }
+            let mut ch = c._handle.channel_open_session().await.map_err(err)?;
+            ch.exec(true, cmd.as_bytes()).await.map_err(err)?;
+            let (mut text, mut code) = (String::new(), None);
+            while let Some(msg) = ch.wait().await {
+                match msg {
+                    russh::ChannelMsg::Data { data } | russh::ChannelMsg::ExtendedData { data, .. } => text.push_str(&String::from_utf8_lossy(&data)),
+                    russh::ChannelMsg::ExitStatus { exit_status } => code = Some(exit_status),
+                    _ => {}
+                }
+            }
+            match code {
+                Some(0) => Ok(String::new()),
+                Some(n) => Err(err(format!("chown failed (exit {n}): {}", text.trim()))),
+                None => Err(err(format!("chown ended without a result {}", text.trim()))),
+            }
+        }
+    })
+    .map(|_| format!("Owner changed to {spec}{}", if recursive { " (recursively)" } else { "" }))
+    .map_err(|e| e.to_string())
+}
+
 /// One item of a remote tree: path, is-dir, size, mtime (parents come before their children).
 type Node = (String, bool, u64, Option<u32>);
 

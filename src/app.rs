@@ -58,8 +58,16 @@ enum Dialog {
     NewFile { text: String, fresh: bool },
     SftpAlias { key: String, text: String, fresh: bool },
     Delete { paths: Vec<PathBuf>, permanent: bool },
+    /// SFTP: change the Linux owner / group of `paths` (runs `chown` on the server).
+    Chown { paths: Vec<PathBuf>, owner: String, group: String, recursive: bool, sudo: bool, fresh: bool },
+    /// F4 editor settings: default command + per-extension rules.
+    Editor { cmd: String, rules: String, fresh: bool },
+    /// The user left an archive that was modified: write the changes back?
+    ArchiveUpdate { zip: PathBuf, quit: bool },
     /// F5 / F6: confirm copying or moving the selection to the other pane.
     Transfer { kind: OpKind, paths: Vec<PathBuf>, dest: PathBuf },
+    /// Copy / move where some targets already exist: asks about the first of `queue`, then the next, ...
+    Conflict { kind: OpKind, srcs: Vec<PathBuf>, dest: PathBuf, queue: Vec<PathBuf>, chosen: HashMap<PathBuf, ops::Policy>, all: bool },
 }
 
 /// In-place rename editor shown inside a file-list row.
@@ -133,7 +141,27 @@ enum Ev {
     Run(Action),
 }
 
+/// A remote file downloaded for editing (F4); saving it in the editor uploads it back.
+struct RemoteEdit {
+    remote: PathBuf,
+    local: PathBuf,
+    /// (mtime, size) of the local copy at the last upload / download.
+    seen: (Option<std::time::SystemTime>, u64),
+    changed_at: Option<Instant>,
+    busy: bool,
+}
+
 pub struct App {
+    edit_tx: std::sync::mpsc::Sender<Result<(PathBuf, PathBuf), String>>,
+    edit_rx: std::sync::mpsc::Receiver<Result<(PathBuf, PathBuf), String>>,
+    up_tx: std::sync::mpsc::Sender<(PathBuf, Result<(), String>)>,
+    up_rx: std::sync::mpsc::Receiver<(PathBuf, Result<(), String>)>,
+    chown_tx: std::sync::mpsc::Sender<Result<String, String>>,
+    chown_rx: std::sync::mpsc::Receiver<Result<String, String>>,
+    remote_edits: Vec<RemoteEdit>,
+    edit_poll: Instant,
+    /// Archives whose "save changes?" question was answered with "Later" (until re-entered).
+    arch_skip: HashSet<String>,
     panes: [Pane; 2],
     active: usize,
     store: Store,
@@ -318,7 +346,19 @@ impl App {
         };
 
         let (sftp_open_tx, sftp_open_rx) = std::sync::mpsc::channel();
+        let (edit_tx, edit_rx) = std::sync::mpsc::channel();
+        let (up_tx, up_rx) = std::sync::mpsc::channel();
+        let (chown_tx, chown_rx) = std::sync::mpsc::channel();
         let mut app = App {
+            edit_tx,
+            edit_rx,
+            up_tx,
+            up_rx,
+            chown_tx,
+            chown_rx,
+            remote_edits: vec![],
+            edit_poll: Instant::now(),
+            arch_skip: HashSet::new(),
             panes: [make(0, &home), make(1, &alt)],
             active: store.active_pane.min(1),
             icons: Icons::default(),
@@ -449,7 +489,29 @@ impl App {
         if srcs.is_empty() {
             return;
         }
-        self.jobs.push(ops::spawn(kind, srcs, dest, ctx.clone()));
+        if let (OpKind::Copy | OpKind::Move, Some(d)) = (kind, dest.as_ref()) {
+            // local targets only: remote / archive folders keep "keep both"
+            if !crate::sftp::is_remote(d) && !crate::archive::in_archive(d) {
+                let queue: Vec<PathBuf> = srcs
+                    .iter()
+                    .filter(|s| {
+                        let Some(n) = s.file_name() else { return false };
+                        let t = d.join(n);
+                        t.exists() && t != **s && !(kind == OpKind::Move && s.parent() == Some(d.as_path()))
+                    })
+                    .cloned()
+                    .collect();
+                if !queue.is_empty() {
+                    self.dialog = Some(Dialog::Conflict { kind, srcs, dest: d.clone(), queue, chosen: HashMap::new(), all: false });
+                    return;
+                }
+            }
+        }
+        self.spawn_op(ctx, kind, srcs, dest, HashMap::new());
+    }
+
+    fn spawn_op(&mut self, ctx: &Context, kind: OpKind, srcs: Vec<PathBuf>, dest: Option<PathBuf>, policies: HashMap<PathBuf, ops::Policy>) {
+        self.jobs.push(ops::spawn_with(kind, srcs, dest, policies, ctx.clone()));
         self.jobs_open = true; // show the operations window
     }
 
@@ -649,6 +711,8 @@ impl App {
             self.inline = None; // navigated away while editing
         }
         self.poll_jobs(ctx);
+        self.check_archives();
+        self.poll_edits(ctx);
         self.sync_watches();
         self.apply_fs_events(ctx);
         self.refresh_diff();
@@ -762,16 +826,6 @@ impl App {
     // ------------------------------------------------------------ commands
 
     fn run(&mut self, ctx: &Context, a: Action) {
-        {
-            let here = crate::archive::in_archive(&self.tab().path);
-            let there = crate::archive::in_archive(&self.panes[1 - self.active].tab().path);
-            let writes_here = matches!(a, Delete | DeletePermanent | Rename | NewFolder | NewFile | ClipCut | ClipPaste | Move);
-            let writes_there = matches!(a, Copy | Move);
-            if (here && writes_here) || (there && writes_there) {
-                self.say("Archives are read-only (you can copy files out of them)");
-                return;
-            }
-        }
         use Action::*;
         let pi = self.active;
         match a {
@@ -871,7 +925,8 @@ impl App {
                 } else if crate::archive::is_archive_name(&e.path) && crate::archive::split_inner(&e.path).is_none() {
                     self.navigate(pi, e.path); // browse the archive like a folder
                 } else if let Some((zip, inner)) = crate::archive::split_inner(&e.path) {
-                    match crate::archive::extract_temp(&zip, &inner) {
+                    let tmp = if crate::archive::active(&zip).is_some() { crate::archive::real_for_edit(&e.path) } else { crate::archive::extract_temp(&zip, &inner) };
+                    match tmp {
                         Ok(tmp) => {
                             if let Err(err) = open::that_detached(&tmp) {
                                 self.say(format!("⚠ Could not open {}: {err}", e.name));
@@ -910,6 +965,14 @@ impl App {
                         self.dialog = Some(Dialog::SftpAlias { key, text, fresh: true });
                     }
                     None => self.say("Open an SFTP folder (or select a connection in sftp:) first"),
+                }
+            }
+            SftpChown => {
+                let paths: Vec<PathBuf> = self.tab().targets().into_iter().filter(|p| crate::sftp::is_remote(p)).collect();
+                if paths.is_empty() {
+                    self.say("Select files or folders on an SFTP server first");
+                } else {
+                    self.dialog = Some(Dialog::Chown { paths, owner: String::new(), group: String::new(), recursive: true, sudo: false, fresh: true });
                 }
             }
             ConnectSftp => {
@@ -1011,11 +1074,21 @@ impl App {
             Delete | DeletePermanent => {
                 let paths = self.tab().targets();
                 if !paths.is_empty() {
-                    let permanent = a == DeletePermanent || paths.iter().any(|p| crate::sftp::is_remote(p));
+                    let permanent = a == DeletePermanent || paths.iter().any(|p| crate::sftp::is_remote(p) || crate::archive::split_inner(p).is_some());
                     self.dialog = Some(Dialog::Delete { paths, permanent });
                 }
             }
             Rename => self.start_inline(pi),
+            EditFile => {
+                let Some(e) = self.tab().current().filter(|e| !e.is_dir && !e.is_up).cloned() else { return self.run(ctx, EditPath) };
+                if crate::archive::is_archive_name(&e.path) && crate::archive::split_inner(&e.path).is_none() {
+                    return self.say("Press Enter to browse an archive; F4 edits the files inside it");
+                }
+                self.edit_file(ctx, e.path);
+            }
+            EditorSettings => {
+                self.dialog = Some(Dialog::Editor { cmd: self.store.editor.clone(), rules: self.store.editor_rules.clone(), fresh: true });
+            }
             ClipCopy | ClipCut => {
                 let paths = self.tab().targets();
                 if !paths.is_empty() {
@@ -1124,7 +1197,7 @@ impl App {
                 self.dirty = true;
                 self.say(format!("Theme: {}", self.store.theme.label()));
             }
-            Quit => self.quit = true,
+            Quit => self.request_quit(),
         }
     }
 
@@ -1163,9 +1236,153 @@ impl App {
         }
     }
 
+    // ------------------------------------------------------- editing (F4)
+
+    fn launch_editor(&mut self, file: &Path) {
+        let cmd = crate::editor::command_for(&self.store.editor, &self.store.editor_rules, file);
+        let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        match crate::editor::launch(&cmd, file) {
+            Ok(()) => self.say(format!("Editing {name}")),
+            Err(e) => self.say(format!("⚠ {e} – set the editor with Ctrl+P → \"Settings: editor\"")),
+        }
+    }
+
+    /// F4 on a file: local files open directly, archive members in their staging copy,
+    /// SFTP files are downloaded first and uploaded again whenever they are saved.
+    fn edit_file(&mut self, ctx: &Context, path: PathBuf) {
+        if crate::sftp::is_remote(&path) {
+            let (c2, tx) = (ctx.clone(), self.edit_tx.clone());
+            let name = display_name(&path);
+            self.say(format!("Downloading {name} for editing…"));
+            std::thread::spawn(move || {
+                let r = crate::sftp::fetch_temp(&path).map(|local| (path.clone(), local)).map_err(|e| format!("⚠ {name}: {e}"));
+                let _ = tx.send(r);
+                c2.request_repaint();
+            });
+            return;
+        }
+        let real = if crate::archive::split_inner(&path).is_some() {
+            self.say("Preparing the archive for editing…");
+            match crate::archive::real_for_edit(&path) {
+                Ok(p) => p,
+                Err(e) => return self.say(format!("⚠ {e}")),
+            }
+        } else {
+            path
+        };
+        self.launch_editor(&real);
+    }
+
+    /// Asks about unsaved archives first; quits when there is nothing left to ask.
+    fn request_quit(&mut self) {
+        if let Some(zip) = crate::archive::sessions().into_iter().find(|z| crate::archive::is_dirty(z)) {
+            self.dialog = Some(Dialog::ArchiveUpdate { zip, quit: true });
+            return;
+        }
+        self.quit = true;
+    }
+
+    /// Asks "update the archive?" once no tab is inside a modified archive any more.
+    fn check_archives(&mut self) {
+        if self.dialog.is_some() {
+            return;
+        }
+        for zip in crate::archive::sessions() {
+            let key = zip.to_string_lossy().to_lowercase();
+            if self.panes.iter().any(|p| p.tabs.iter().any(|t| crate::archive::contains(&zip, &t.path))) {
+                self.arch_skip.remove(&key);
+                continue;
+            }
+            if self.arch_skip.contains(&key) {
+                continue;
+            }
+            if crate::archive::is_dirty(&zip) {
+                self.dialog = Some(Dialog::ArchiveUpdate { zip, quit: false });
+                return;
+            }
+            crate::archive::discard(&zip); // nothing changed: drop the working copy
+        }
+    }
+
+    /// Starts editors for downloaded remote files and uploads them back when they are saved.
+    fn poll_edits(&mut self, ctx: &Context) {
+        while let Ok(r) = self.edit_rx.try_recv() {
+            match r {
+                Ok((remote, local)) => {
+                    let md = std::fs::metadata(&local).ok();
+                    let seen = (md.as_ref().and_then(|m| m.modified().ok()), md.map_or(0, |m| m.len()));
+                    self.remote_edits.retain(|e| e.remote != remote);
+                    self.remote_edits.push(RemoteEdit { remote, local: local.clone(), seen, changed_at: None, busy: false });
+                    self.launch_editor(&local);
+                    self.say(format!("Editing {} – saving it uploads the file back to the server", display_name(&local)));
+                }
+                Err(e) => self.say(e),
+            }
+        }
+        while let Ok(r) = self.chown_rx.try_recv() {
+            match r {
+                Ok(m) => {
+                    self.say(m);
+                    self.reload_all();
+                }
+                Err(e) => self.say(format!("⚠ {e}")),
+            }
+        }
+        while let Ok((remote, r)) = self.up_rx.try_recv() {
+            if let Some(e) = self.remote_edits.iter_mut().find(|e| e.remote == remote) {
+                e.busy = false;
+            }
+            match r {
+                Ok(()) => {
+                    self.say(format!("Uploaded {} ✓", display_name(&remote)));
+                    let parent = remote.parent().map(PathBuf::from);
+                    for p in &mut self.panes {
+                        if parent.as_ref().is_some_and(|d| &p.tab().path == d) {
+                            p.tab_mut().reload(None);
+                        }
+                    }
+                }
+                Err(e) => self.say(format!("⚠ Upload of {} failed: {e}", display_name(&remote))),
+            }
+        }
+        if self.remote_edits.is_empty() {
+            return;
+        }
+        ctx.request_repaint_after(Duration::from_millis(500));
+        if self.edit_poll.elapsed() < Duration::from_millis(300) {
+            return;
+        }
+        self.edit_poll = Instant::now();
+        for e in &mut self.remote_edits {
+            if e.busy {
+                continue;
+            }
+            let md = std::fs::metadata(&e.local).ok();
+            let now = (md.as_ref().and_then(|m| m.modified().ok()), md.map_or(0, |m| m.len()));
+            if now == e.seen {
+                e.changed_at = None;
+            } else if let Some(t) = e.changed_at {
+                // editors often write twice: upload once the file has been quiet for a moment
+                if t.elapsed() >= Duration::from_millis(700) {
+                    e.busy = true;
+                    e.changed_at = None;
+                    e.seen = now;
+                    let (local, remote, tx, c2) = (e.local.clone(), e.remote.clone(), self.up_tx.clone(), ctx.clone());
+                    std::thread::spawn(move || {
+                        let r = crate::sftp::upload(&local, &remote, &std::sync::atomic::AtomicBool::new(false), &mut |_| {});
+                        let _ = tx.send((remote, r));
+                        c2.request_repaint();
+                    });
+                }
+            } else {
+                e.changed_at = Some(Instant::now());
+            }
+        }
+    }
+
     fn start_inline(&mut self, pi: usize) {
         let tab = self.panes[pi].tab();
-        let Some(e) = tab.current().filter(|e| !e.is_up && !crate::archive::in_archive(&e.path)) else { return };
+        let Some(e) = tab.current().filter(|e| !e.is_up) else { return };
         self.inline = Some(InlineRename {
             pi,
             dir: tab.path.clone(),
@@ -1200,11 +1417,20 @@ impl App {
         }
         let target = path.with_file_name(new_name);
         let remote = crate::sftp::is_remote(path);
-        let exists = if remote { crate::sftp::exists(&target) } else { target.exists() };
-        if target != path && exists && !target.to_string_lossy().eq_ignore_ascii_case(&path.to_string_lossy()) {
+        // inside an archive the rename happens in its staging copy
+        let (rpath, rtarget) = if crate::archive::split_inner(path).is_some() {
+            match (crate::archive::real_for_write(path), crate::archive::real_for_write(&target)) {
+                (Ok(a), Ok(b)) => (a, b),
+                (Err(e), _) | (_, Err(e)) => return self.say(format!("⚠ {e}")),
+            }
+        } else {
+            (path.to_path_buf(), target.clone())
+        };
+        let exists = if remote { crate::sftp::exists(&rtarget) } else { rtarget.exists() };
+        if rtarget != rpath && exists && !rtarget.to_string_lossy().eq_ignore_ascii_case(&rpath.to_string_lossy()) {
             return self.say(format!("⚠ \"{new_name}\" already exists"));
         }
-        let renamed = if remote { crate::sftp::rename(path, &target) } else { std::fs::rename(path, &target) };
+        let renamed = if remote { crate::sftp::rename(&rpath, &rtarget) } else { std::fs::rename(&rpath, &rtarget) };
         match renamed {
             Ok(()) => {
                 self.say(format!("Renamed to {new_name}"));
@@ -1243,7 +1469,13 @@ impl App {
         if let Err(e) = validate_name(name) {
             return self.say(format!("⚠ {e}"));
         }
-        let target = self.tab().path.join(name);
+        let mut target = self.tab().path.join(name);
+        if crate::archive::in_archive(&target) {
+            match crate::archive::real_for_write(&target) {
+                Ok(p) => target = p,
+                Err(e) => return self.say(format!("⚠ {e}")),
+            }
+        }
         let r = if crate::sftp::is_remote(&target) {
             if folder { crate::sftp::mkdir(&target) } else { crate::sftp::create_file(&target) }
         } else if folder {
@@ -1602,8 +1834,12 @@ impl App {
         let Some(mut dlg) = self.dialog.take() else { return };
         // In the confirm dialogs (delete, copy, move) Enter is left to the focused button (OK by default), so
         // Tab -> Cancel -> Enter really cancels.
-        let is_confirm = matches!(dlg, Dialog::Delete { .. } | Dialog::Transfer { .. });
-        let (esc, enter) = ctx.input_mut(|i| (i.consume_key(Modifiers::NONE, Key::Escape), !is_confirm && i.consume_key(Modifiers::NONE, Key::Enter)));
+        let is_confirm = matches!(dlg, Dialog::Delete { .. } | Dialog::Transfer { .. } | Dialog::Conflict { .. });
+        // Enter must reach the multi-line editor box / the archive buttons
+        let keeps_enter = is_confirm || matches!(dlg, Dialog::Editor { .. } | Dialog::ArchiveUpdate { .. });
+        let (esc, enter) = ctx.input_mut(|i| (i.consume_key(Modifiers::NONE, Key::Escape), !keeps_enter && i.consume_key(Modifiers::NONE, Key::Enter)));
+        let mut arch_choice: Option<bool> = None; // Some(true) = update, Some(false) = discard
+        let mut conflict_choice: Option<ops::Policy> = None;
         let mut ok = enter;
         let mut cancel = esc;
 
@@ -1611,10 +1847,14 @@ impl App {
             Dialog::NewFolder { .. } => "New folder",
             Dialog::NewFile { .. } => "New file",
             Dialog::SftpAlias { .. } => "SFTP alias",
+            Dialog::Chown { .. } => "Change owner",
+            Dialog::Editor { .. } => "Editor for F4",
+            Dialog::ArchiveUpdate { .. } => "Archive changed",
             Dialog::Delete { permanent: true, .. } => "Delete permanently",
             Dialog::Delete { .. } => "Delete",
             Dialog::Transfer { kind: OpKind::Move, .. } => "Move",
             Dialog::Transfer { .. } => "Copy",
+            Dialog::Conflict { .. } => "File already exists",
         };
         egui::Window::new(title)
             .collapsible(false)
@@ -1624,6 +1864,53 @@ impl App {
                 ui.set_min_width(420.0);
                 match &mut dlg {
                     Dialog::NewFolder { text, fresh } => text_field(ui, text, fresh, None),
+                    Dialog::Editor { cmd, rules, fresh } => {
+                        ui.label("Command to edit a file (empty = Notepad)");
+                        ui.weak("Placeholders: {file} {dir} {line}.  The file is appended when {file} is missing.");
+                        text_field(ui, cmd, fresh, None);
+                        ui.weak("e.g.  code {file}      \"C:\\Program Files\\Notepad++\\notepad++.exe\" -n{line} {file}");
+                        ui.add_space(6.0);
+                        ui.label("Per-extension rules – one per line:  ext1,ext2 = command   (first match wins, * = any)");
+                        ui.add(egui::TextEdit::multiline(rules).desired_rows(5).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace).hint_text("rs,toml = code {file}\nmd = typora {file}"));
+                    }
+                    Dialog::ArchiveUpdate { zip, quit } => {
+                        ui.label(format!("You changed the contents of \"{}\".", display_name(zip)));
+                        ui.label(if *quit { "Write the changes back into the archive before exiting?" } else { "Update the archive with your changes?" });
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            let upd = ui.add(egui::Button::new("  Update archive  ").fill(ACCENT.gamma_multiply(0.75)));
+                            if ctx.memory(|m| m.focused().is_none()) {
+                                upd.request_focus();
+                            }
+                            if upd.clicked() {
+                                arch_choice = Some(true);
+                            }
+                            if ui.button("Discard changes").clicked() {
+                                arch_choice = Some(false);
+                            }
+                            if ui.button(if *quit { "Cancel" } else { "Later" }).on_hover_text("Keep the changes for now (Esc)").clicked() {
+                                cancel = true;
+                            }
+                        });
+                    }
+                    Dialog::Chown { paths, owner, group, recursive, sudo, fresh } => {
+                        ui.label(if paths.len() == 1 { format!("Change owner of \"{}\"", display_name(&paths[0])) } else { format!("Change owner of {} items", paths.len()) });
+                        ui.weak("Runs chown on the server. A name or a number; leave a field empty to keep it.");
+                        egui::Grid::new("chown_grid").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
+                            ui.label("Owner");
+                            let r = ui.add(egui::TextEdit::singleline(owner).desired_width(220.0));
+                            if *fresh {
+                                r.request_focus();
+                                *fresh = false;
+                            }
+                            ui.end_row();
+                            ui.label("Group");
+                            ui.add(egui::TextEdit::singleline(group).desired_width(220.0));
+                            ui.end_row();
+                        });
+                        ui.checkbox(recursive, "Recursive (-R) – include everything inside folders");
+                        ui.checkbox(sudo, "Use sudo (passwordless sudo must be allowed)");
+                    }
                     Dialog::SftpAlias { key, text, fresh } => {
                         ui.label(format!("Alias for {key}"));
                         ui.weak("Use it like sftp://alias/path . Leave empty to remove the alias.");
@@ -1651,6 +1938,51 @@ impl App {
                             }
                         }
                     }
+                    Dialog::Conflict { dest, queue, all, .. } => {
+                        let src = queue[0].clone();
+                        let name = src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        ui.label(format!("\"{name}\" already exists in:"));
+                        ui.label(egui::RichText::new(dest.display().to_string()).strong());
+                        ui.add_space(4.0);
+                        let info = |p: &Path| match std::fs::metadata(p) {
+                            Ok(m) if m.is_dir() => format!("folder, {}", crate::model::fmt_time(m.modified().ok())),
+                            Ok(m) => format!("{}, {}", crate::model::fmt_size(m.len()), crate::model::fmt_time(m.modified().ok())),
+                            Err(_) => "?".to_string(),
+                        };
+                        egui::Grid::new("conflict_info").num_columns(2).spacing([10.0, 2.0]).show(ui, |ui| {
+                            ui.weak("Existing:");
+                            ui.label(info(&dest.join(&name)));
+                            ui.end_row();
+                            ui.weak("New:");
+                            ui.label(info(&src));
+                            ui.end_row();
+                        });
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            let keep = ui.add(egui::Button::new(" Keep both ").fill(ACCENT.gamma_multiply(0.75))).on_hover_text("Save as \"name (2)\"");
+                            if ctx.memory(|m| m.focused().is_none()) {
+                                keep.request_focus();
+                            }
+                            if keep.clicked() {
+                                conflict_choice = Some(ops::Policy::Rename);
+                            }
+                            if ui.button("Overwrite").clicked() {
+                                conflict_choice = Some(ops::Policy::Overwrite);
+                            }
+                            if ui.button("Skip").clicked() {
+                                conflict_choice = Some(ops::Policy::Skip);
+                            }
+                            if ui.button("Overwrite if newer").on_hover_text("Replace only when the new file is newer").clicked() {
+                                conflict_choice = Some(ops::Policy::Newer);
+                            }
+                            if ui.button("Cancel").clicked() {
+                                cancel = true;
+                            }
+                        });
+                        if queue.len() > 1 {
+                            ui.checkbox(all, format!("Do this for all {} remaining conflicts", queue.len() - 1));
+                        }
+                    }
                     Dialog::Delete { paths, permanent } => {
                         if *permanent {
                             ui.colored_label(ui.visuals().error_fg_color, "This cannot be undone.");
@@ -1669,6 +2001,9 @@ impl App {
                     }
                 }
                 ui.add_space(6.0);
+                if matches!(dlg, Dialog::ArchiveUpdate { .. } | Dialog::Conflict { .. }) {
+                    return;
+                }
                 ui.horizontal(|ui| {
                     let mut ok_btn = egui::Button::new("  OK  ");
                     if is_confirm {
@@ -1687,14 +2022,74 @@ impl App {
                 });
             });
 
+        if let (Some(policy), Dialog::Conflict { .. }) = (conflict_choice, &dlg) {
+            let Dialog::Conflict { kind, srcs, dest, mut queue, mut chosen, all } = dlg else { unreachable!() };
+            if all {
+                for q in queue.drain(..) {
+                    chosen.insert(q, policy);
+                }
+            } else {
+                chosen.insert(queue.remove(0), policy);
+            }
+            if queue.is_empty() {
+                let ctx = ctx.clone();
+                self.spawn_op(&ctx, kind, srcs, Some(dest), chosen);
+            } else {
+                self.dialog = Some(Dialog::Conflict { kind, srcs, dest, queue, chosen, all: false });
+            }
+            return;
+        }
+        if let (Some(update), Dialog::ArchiveUpdate { zip, quit }) = (arch_choice, &dlg) {
+            let (zip, quit) = (zip.clone(), *quit);
+            if update {
+                match crate::archive::save(&zip) {
+                    Ok(()) => self.say(format!("Archive {} updated", display_name(&zip))),
+                    Err(e) => {
+                        self.say(format!("⚠ Could not update {}: {e}", display_name(&zip)));
+                        return; // the session (and the changes) stay
+                    }
+                }
+            } else {
+                crate::archive::discard(&zip);
+                self.say(format!("Changes to {} discarded", display_name(&zip)));
+            }
+            self.reload_all();
+            if quit {
+                self.request_quit();
+            }
+            return;
+        }
         if cancel {
+            if let Dialog::ArchiveUpdate { zip, quit: false } = &dlg {
+                self.arch_skip.insert(zip.to_string_lossy().to_lowercase());
+            }
             return;
         }
         if ok {
             match dlg {
+                Dialog::Editor { cmd, rules, .. } => {
+                    self.store.editor = cmd.trim().to_string();
+                    self.store.editor_rules = rules;
+                    self.store.save();
+                    self.say("Editor saved – F4 now uses it");
+                }
+                Dialog::ArchiveUpdate { .. } | Dialog::Conflict { .. } => {}
                 Dialog::NewFolder { text, .. } => self.do_create(text.trim(), true),
                 Dialog::NewFile { text, .. } => self.do_create(text.trim(), false),
                 Dialog::SftpAlias { key, text, .. } => self.set_alias(&key, text.trim()),
+                Dialog::Chown { paths, owner, group, recursive, sudo, .. } => {
+                    if owner.trim().is_empty() && group.trim().is_empty() {
+                        self.say("Enter an owner and/or a group");
+                        self.dialog = Some(Dialog::Chown { paths, owner, group, recursive, sudo, fresh: true });
+                        return;
+                    }
+                    self.say("Changing owner…");
+                    let (tx, ctx2) = (self.chown_tx.clone(), ctx.clone());
+                    std::thread::spawn(move || {
+                        let _ = tx.send(crate::sftp::chown(&paths, &owner, &group, recursive, sudo));
+                        ctx2.request_repaint();
+                    });
+                }
                 Dialog::Transfer { kind, paths, dest } => {
                     let ctx = ctx.clone();
                     self.start_op(&ctx, kind, paths, Some(dest));
@@ -1740,6 +2135,7 @@ impl App {
                     ("F7 New folder", Action::NewFolder),
                     ("F6 Move", Action::Move),
                     ("F5 Copy", Action::Copy),
+                    ("F4 Edit", Action::EditFile),
                     ("F2 Rename", Action::Rename),
                 ] {
                     if chip(ui, label, false, None).clicked() {
@@ -1963,6 +2359,7 @@ impl App {
         if let Some(pe) = path_edit.as_ref() {
             if pe.text == "\u{0}close" {
                 *path_edit = None;
+                ctx.memory_mut(|m| m.focused().map(|id| m.surrender_focus(id))); // keys must reach the file list again
             }
         }
 
@@ -2608,6 +3005,10 @@ fn item_interact(ui: &mut Ui, resp: &egui::Response, pi: usize, vi: usize, e: &E
             evs.push(Ev::Run(Action::FavoriteItem));
             ui.close();
         }
+        if crate::sftp::is_remote(&e.path) && !e.is_up && ui.button("Change owner (chown)…").clicked() {
+            evs.push(Ev::Run(Action::SftpChown));
+            ui.close();
+        }
         if crate::sftp::is_remote(&e.path) && ui.button("SFTP alias…").clicked() {
             evs.push(Ev::Run(Action::SftpAlias));
             ui.close();
@@ -3184,6 +3585,10 @@ impl eframe::App for App {
             self.drag = None;
             self.tab_drag = None;
         }
+        if ctx.input(|i| i.viewport().close_requested()) && !self.quit && crate::archive::sessions().iter().any(|z| crate::archive::is_dirty(z)) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.request_quit();
+        }
         self.handle_keys(&ctx);
 
         let mut evs: Vec<Ev> = vec![];
@@ -3247,13 +3652,16 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self) {
+        for z in crate::archive::sessions() {
+            crate::archive::discard(&z); // unsaved changes were declined / confirmed earlier
+        }
         self.save_state();
     }
 }
 
 impl App {
     fn apply(&mut self, ctx: &Context, ev: Ev) {
-        if !matches!(ev, Ev::DropHover(_)) {
+        if !matches!(ev, Ev::DropHover(_) | Ev::TabRects(..)) {
             self.rename_timer = None; // any other interaction cancels a pending rename
         }
         match ev {
@@ -3290,6 +3698,12 @@ impl App {
                     t.select_range(a, vi);
                     t.cursor = vi;
                 } else if ctrl {
+                    // the item under the cursor becomes part of the multi-selection
+                    if t.selected.is_empty() && t.cursor != vi {
+                        if let Some(p) = t.current().filter(|e| !e.is_up).map(|e| e.path.clone()) {
+                            t.selected.insert(p);
+                        }
+                    }
                     t.toggle_at(vi);
                     t.cursor = vi;
                     t.anchor = vi;
@@ -3428,6 +3842,7 @@ impl App {
         for p in &mut self.panes {
             if p.path_edit.as_ref().is_some_and(|e| e.text == "\u{0}close") {
                 p.path_edit = None;
+                ctx.memory_mut(|m| m.focused().map(|id| m.surrender_focus(id)));
             }
         }
     }
@@ -3509,6 +3924,7 @@ impl App {
         for p in &mut self.panes {
             if p.path_edit.as_ref().is_some_and(|e| e.text == "\u{0}close") {
                 p.path_edit = None;
+                ctx.memory_mut(|m| m.focused().map(|id| m.surrender_focus(id)));
             }
         }
         let Some(d) = &self.drag else { return };

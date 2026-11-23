@@ -131,6 +131,12 @@ pub struct Store {
     /// SFTP connection aliases: `user@host:port` -> short name.
     #[serde(default)]
     pub aliases: HashMap<String, String>,
+    /// F4 editor command (empty = Notepad); see `editor.rs`.
+    #[serde(default)]
+    pub editor: String,
+    /// Per-extension editor rules, one `ext1,ext2 = command` per line.
+    #[serde(default)]
+    pub editor_rules: String,
     /// Theme of the text-compare window (`None` = same as the main window).
     #[serde(default)]
     pub diff_dark: Option<bool>,

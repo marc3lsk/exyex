@@ -4,6 +4,7 @@ mod actions;
 mod app;
 mod archive;
 mod deep;
+mod editor;
 mod icon_draw;
 mod icons;
 #[cfg(windows)]

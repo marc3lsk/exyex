@@ -22,7 +22,8 @@ Native (Rust + egui) dual-pane file manager for Windows — a keyboard-first alt
 | F2, Shift+F6 | rename |
 | Ctrl+C / X / V | clipboard (inside exyex) |
 | Ctrl+T / W / Shift+T, Ctrl+Tab | new / close / reopen tab, next tab |
-| Ctrl+L, F4, Alt+D | edit path |
+| Ctrl+L, Alt+D | edit path |
+| F4 | edit the file under the cursor in the external editor (on a folder: edit path) – see *Editing files* |
 | Alt+←/→/↑, Backspace | back / forward / up |
 | Space, Ins | toggle selection; Ctrl+A / I select all / invert; Shift+arrows range |
 | Ctrl+F3..F6 | sort name / ext / date / size |
@@ -105,10 +106,21 @@ handled by exyex). **Ctrl+Shift+K** (or palette → *Connect to SFTP server*) op
   file in each pane. Changed lines are paired and the changed characters highlighted; **F7 / F8** jump to the previous / next
   difference, checkboxes ignore whitespace / case, Esc closes. Works on local, SFTP and zip-inner files (text only, up to 4 MB).
 - **Zip / jar as folders:** Enter on a `.zip` browses it (path bar, search and subfolder search work inside).
-  Archives are read-only; copy (F5, drag, clipboard) extracts, Enter on a file inside opens a temp copy.
+  Copy out (F5, drag, clipboard) extracts. Archives are **editable**: copy / move / paste files in, delete, rename,
+  new folder / file and F4 all work. The first change extracts the archive into a working copy; when you leave the
+  archive (all tabs out of it) exyex asks **Update archive / Discard changes / Later**, and also before exiting.
+  Updating rewrites the zip (everything is re-compressed with deflate; dates are kept).
 - **Tabs:** drag a tab left/right inside its strip to reorder (the blue mark shows where it lands).
 - Slow or network folders load in the background (spinner in the footer); window position/size is remembered.
 - Terminals: Alt+Shift+P PowerShell, Alt+Shift+C cmd, Alt+Shift+E Explorer here, Ctrl+Shift+O Windows Terminal.
+
+## Editing files (F4)
+**F4** opens the file under the cursor in an external editor (default: Notepad). Set your own with
+**Ctrl+P → Settings: editor for F4**: a command template (`code {file}`, `"C:\Program Files\Notepad++\notepad++.exe" -n{line} {file}`;
+placeholders `{file}` `{dir}` `{line}`, the file is appended when `{file}` is missing) and optional per-extension rules,
+one per line: `rs,toml = code {file}`. Files inside a zip are edited in the archive's working copy (see above).
+**SFTP files:** F4 downloads the file, opens the editor and **uploads it back every time you save**
+(the status bar confirms each upload).
 
 ## Install / command line
 Run `exyex_<version>_x64_setup.exe` (or `exyex.exe --install`). It installs per user (no admin):

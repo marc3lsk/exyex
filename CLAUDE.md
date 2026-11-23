@@ -5,10 +5,9 @@ Total Commander. No web UI. User-facing docs (keys, search, install) are in `REA
 to change the code safely. The user writes Slovak; answer in Slovak, keep code/comments in English.
 
 ## Commands
-- `cargo build` / `cargo test` (13 tests: ops, search, deep). `.\dev.ps1` (-Release, -Watch), `.\bump-version.ps1`,
+- `cargo build` / `cargo test` (~28 tests: ops, search, deep, archive, editor, textdiff). `.\dev.ps1` (-Release, -Watch), `.\bump-version.ps1`,
   `.\release.ps1 -Bundle exe|setup|zip|all` (outputs to `release\`, git-ignored).
 - **Kill the running app before building** (`taskkill /F /IM exyex.exe`), otherwise the exe is locked.
-- Not a git repo yet (no commits made).
 
 ## Source map (`src/`)
 | File | Role |
@@ -17,7 +16,9 @@ to change the code safely. The user writes Slovak; answer in Slovak, keep code/c
 | `app.rs` (largest) | `App` state, all UI (`ui_pane`, dialogs, palette, jobs window), `Ev` event queue, `run(Action)`, themes |
 | `model.rs` | `Entry`, `Tab` (entries/view/cursor/selection/history/sort/filter), `rebuild_view`, path helpers |
 | `search.rs` | in-folder search: `SearchMode` (Smart/Fuzzy/Wildcard/Regex), `compile -> Matcher` (score/ranges), `glob_match` |
-| `archive.rs` | read-only zip/jar as folders: virtual paths (zip file path + inner path) (`split`, `list`, `extract`); hooked into `model::read_dir` and `ops` |
+| `archive.rs` | zip/jar as folders: virtual paths (zip file path + inner path) (`split`, `list`, `extract`); hooked into `model::read_dir` and `ops`. Editable through *edit sessions* (staging folder, see Architecture) |
+| `editor.rs` | F4 external editor: command templates (`{file}` `{dir}` `{line}`), per-extension rules, `launch` (resolves `.cmd`/`.exe` on PATH) |
+| `textdiff.rs` | Ctrl+Shift+D side-by-side text diff in its own OS window (`similar` crate), own dark/light theme |
 | `sftp.rs` | SFTP via `russh` + `russh-sftp` (pure Rust, `ring`; blocking API over a private tokio runtime) + Pageant agent auth; virtual paths `sftp:\user@host[:port]\~\dir`; connection pool, TOFU host keys, list/transfer/remove |
 | `thumbs.rs` | async image thumbnails for the grid view (texture cache) |
 | `preview.rs` | Quick Look panel (F3): background loader + UI |
@@ -50,8 +51,17 @@ to change the code safely. The user writes Slovak; answer in Slovak, keep code/c
   for unwatched dirs.
 - **Async navigation:** `Tab::go/go_back/go_forward` read the folder on a thread and wait 120 ms; slow folders
   set `Tab.loading` and finish in `poll_load` (called from `App::tick`). Visits are recorded only on arrival.
-- **Archives:** a path is virtual when an ancestor is an existing `.zip/.jar` file (`archive::split`). `App::run` blocks
-  write actions in archives; `ops` extracts when a copy source is inside one.
+- **Archives:** a path is virtual when an ancestor is an existing `.zip/.jar` file (`archive::split`; `in_archive` is also true
+  for the zip file itself – use `split_inner` when you mean "something inside"). Writes are allowed: the first write
+  (`archive::real_for_write` / `real_for_edit`, called from `ops::run`, `do_rename`, `do_create`, F4) extracts the whole zip into
+  a staging folder (an *edit session*, `SESSIONS`); while a session exists `list/read_head/size/extract/extract_temp` read the
+  staging folder, and `ops` maps archive sources/dest to staging paths. `App::check_archives` (each tick) asks
+  `Dialog::ArchiveUpdate` once no tab is inside the zip any more (`archive::save` rewrites the zip atomically, `discard` drops
+  the copy); quit / window close ask first (`request_quit`). Extraction into staging is synchronous on the UI thread when it
+  starts from rename/create/F4 (big zips freeze briefly).
+- **F4 / editor:** `Action::EditFile` (F4; on a folder it falls back to `EditPath`). `Store.editor` + `Store.editor_rules`
+  (`Dialog::Editor`). Remote files: `edit_file` downloads via `sftp::fetch_temp`, `App.remote_edits` polls the local mtime
+  (700 ms quiet period) and uploads with `sftp::upload` on a thread. Upload path was not run against a real server yet.
 - **Search filters:** `search::compile` strips `:size/:age/:date/:type/:ext` tokens into `Matcher.filters`
   (`filters_ok(&Entry)`); the rest is the name query. `rebuild_view` and the deep walker apply both.
 - **Content search:** `SearchOpts.content` (implies deep). `deep.rs` feeds files to 4 scanner threads; results carry
@@ -82,5 +92,4 @@ to change the code safely. The user writes Slovak; answer in Slovak, keep code/c
   subfolder search UI, Alt+Enter.
 
 ## Ideas offered but not done
-See `ROADMAP.md`. Notably: "Open in exyex" Explorer context menu, WinSCP/SFTP (via Pageant; phased plan discussed), first
-git commit.
+See `ROADMAP.md`. Notably: "Open in exyex" Explorer context menu, bulk rename, workspaces.

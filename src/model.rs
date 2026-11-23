@@ -424,7 +424,9 @@ impl Tab {
         } else {
             scored.sort_by(|&(_, a), &(_, b)| {
                 let (x, y) = (&entries[a], &entries[b]);
-                y.is_dir.cmp(&x.is_dir).then_with(|| {
+                // folders first, except when sorting by date: then files and folders are mixed
+                let group = if key == SortKey::Modified { std::cmp::Ordering::Equal } else { y.is_dir.cmp(&x.is_dir) };
+                group.then_with(|| {
                     let by_name = natural_cmp(&x.name, &y.name);
                     let o = match key {
                         SortKey::Name => by_name,
