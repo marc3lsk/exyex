@@ -261,6 +261,7 @@ fn setup_style(ctx: &Context) {
     dark.panel_fill = Color32::from_rgb(28, 29, 33);
     dark.extreme_bg_color = Color32::from_rgb(20, 21, 24);
     dark.widgets.noninteractive.bg_stroke = Stroke::new(1.0, Color32::from_gray(52));
+    flatten(&mut dark, true);
     ctx.set_visuals_of(Theme::Dark, dark);
 
     let mut light = egui::Visuals::light();
@@ -269,12 +270,43 @@ fn setup_style(ctx: &Context) {
     light.extreme_bg_color = Color32::WHITE;
     light.override_text_color = Some(Color32::from_gray(20));
     light.widgets.noninteractive.bg_stroke = Stroke::new(1.0, Color32::from_gray(210));
+    flatten(&mut light, false);
     ctx.set_visuals_of(Theme::Light, light);
 
     ctx.all_styles_mut(|s| {
         s.spacing.item_spacing = vec2(6.0, 4.0);
         s.spacing.button_padding = vec2(6.0, 2.0);
     });
+}
+
+/// Flat look: no borders on buttons, windows and dialogs; hover / press / keyboard focus are shown by the fill only.
+fn flatten(v: &mut egui::Visuals, dark: bool) {
+    let g = |dk: u8, lt: u8| Color32::from_gray(if dark { dk } else { lt });
+    let radius = egui::CornerRadius::same(6);
+    for (w, fill) in [
+        (&mut v.widgets.inactive, g(46, 228)),
+        (&mut v.widgets.hovered, g(62, 213)),
+        (&mut v.widgets.active, g(80, 196)), // pressed and keyboard-focused
+        (&mut v.widgets.open, g(62, 213)),
+    ] {
+        w.bg_stroke = Stroke::NONE;
+        w.weak_bg_fill = fill;
+        w.bg_fill = fill;
+        w.expansion = 0.0;
+        w.corner_radius = radius;
+    }
+    // no focus ring (width 0), but the colour must stay: egui draws selected text in it
+    v.selection.stroke = Stroke::new(0.0, if dark { Color32::WHITE } else { Color32::from_gray(15) });
+    v.window_stroke = Stroke::NONE;
+    v.window_shadow = egui::epaint::Shadow { offset: [0, 6], blur: 24, spread: 0, color: Color32::from_black_alpha(if dark { 140 } else { 70 }) };
+    v.popup_shadow = v.window_shadow;
+}
+
+/// Hover / focus feedback for buttons that have an explicit (accent) fill.
+fn accent_hover(ui: &Ui, r: &egui::Response) {
+    if r.hovered() || r.has_focus() {
+        ui.painter().rect_filled(r.rect, 6.0, Color32::from_white_alpha(if r.is_pointer_button_down_on() { 48 } else { 28 }));
+    }
 }
 
 fn apply_theme(ctx: &Context, t: ThemeChoice) {
@@ -1871,6 +1903,9 @@ impl App {
             .anchor(Align2::CENTER_CENTER, [0.0, -40.0])
             .show(ctx, |ui| {
                 ui.set_min_width(420.0);
+                // roomier buttons in dialogs
+                ui.spacing_mut().button_padding = vec2(16.0, 7.0);
+                ui.spacing_mut().item_spacing.x = 8.0;
                 match &mut dlg {
                     Dialog::NewFolder { text, fresh } => text_field(ui, text, fresh, None),
                     Dialog::Editor { cmd, rules, fresh } => {
@@ -1888,6 +1923,7 @@ impl App {
                         ui.add_space(6.0);
                         ui.horizontal(|ui| {
                             let upd = ui.add(egui::Button::new("  Update archive  ").fill(ACCENT.gamma_multiply(0.75)));
+                            accent_hover(ui, &upd);
                             if ctx.memory(|m| m.focused().is_none()) {
                                 upd.request_focus();
                             }
@@ -1974,6 +2010,7 @@ impl App {
                         ui.add_space(6.0);
                         ui.horizontal(|ui| {
                             let keep = ui.add(egui::Button::new(" Keep both ").fill(ACCENT.gamma_multiply(0.75))).on_hover_text("Save as \"name (2)\"");
+                            accent_hover(ui, &keep);
                             if ctx.memory(|m| m.focused().is_none()) {
                                 keep.request_focus();
                             }
@@ -2024,6 +2061,9 @@ impl App {
                         ok_btn = ok_btn.fill(ACCENT.gamma_multiply(0.75));
                     }
                     let ok_resp = ui.add(ok_btn);
+                    if is_confirm {
+                        accent_hover(ui, &ok_resp);
+                    }
                     if is_confirm && ctx.memory(|m| m.focused().is_none()) {
                         ok_resp.request_focus(); // OK is the default button
                     }
