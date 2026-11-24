@@ -197,6 +197,7 @@ pub struct App {
     diff: [HashMap<String, Diff>; 2],
     typeahead: (String, Instant),
     drives: Vec<PathBuf>,
+    drives_poll: Instant,
     /// OS file-system notifications for the folders shown in the active tabs.
     watcher: Option<notify::RecommendedWatcher>,
     fs_rx: std::sync::mpsc::Receiver<Vec<PathBuf>>,
@@ -422,6 +423,7 @@ impl App {
             diff: [HashMap::new(), HashMap::new()],
             typeahead: (String::new(), Instant::now()),
             drives: list_drives(),
+            drives_poll: Instant::now(),
             watcher,
             fs_rx,
             watched: HashMap::new(),
@@ -721,6 +723,15 @@ impl App {
     }
 
     fn tick(&mut self, ctx: &Context) {
+        // USB sticks and other removable drives come and go: re-read the drive list every 1.5 s (cheap Win32 call)
+        if self.drives_poll.elapsed() >= Duration::from_millis(1500) {
+            self.drives_poll = Instant::now();
+            let now = list_drives();
+            if now != self.drives {
+                self.drives = now;
+            }
+        }
+        ctx.request_repaint_after(Duration::from_millis(1500));
         let mut requests = vec![];
         if let Some(s) = &self.ipc {
             while let Ok(r) = s.rx.try_recv() {
