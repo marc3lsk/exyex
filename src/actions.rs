@@ -33,6 +33,7 @@ pub enum Action {
     Delete,
     DeletePermanent,
     Rename,
+    Zip,
     ClipCopy,
     ClipCut,
     ClipPaste,
@@ -53,6 +54,7 @@ pub enum Action {
     ConnectSftp,
     SftpAlias,
     SftpChown,
+    SftpPutty,
     FavoriteItem,
     SftpRoot,
     ViewCycle,
@@ -85,10 +87,10 @@ use Action::*;
 
 /// Actions listed in the command palette (in display order).
 pub const PALETTE_ACTIONS: &[Action] = &[
-    FolderJump, Copy, Move, Rename, Delete, DeletePermanent, NewFolder, NewFile, ClipCopy, ClipCut, ClipPaste,
+    FolderJump, Copy, Move, Rename, Zip, Delete, DeletePermanent, NewFolder, NewFile, ClipCopy, ClipCut, ClipPaste,
     CopyPath, CopyFolderPath, NewTab, CloseTab, CloseOtherTabs, CloseTabsLeft, CloseTabsRight, ReopenTab, NextTab, PrevTab, SwitchPane, SwapPanes, MirrorToOther, Up, Back,
     Forward, Open, OpenInNewTab, Refresh, EditPath, Filter, SelectAll, SelectNone, InvertSelection, ToggleSelect,
-    ToggleHidden, SortName, SortExt, SortSize, SortDate, ToggleFavorite, Reveal, ShowInFolder, ConnectSftp, SftpAlias, SftpChown, FavoriteItem, SftpRoot, ViewCycle, ViewDetails, ViewCompact, ViewGrid, ColExt, ColSize, ColDate, QuickLook, CompareToggle, SelectDiff, SyncToOther, TextCompare, EditFile, EditorSettings, Root, ExplorerHere, Terminal, PowerShellHere, CmdHere, ThemeCycle, ThemeSystem, ThemeLight, ThemeDark, Quit,
+    ToggleHidden, SortName, SortExt, SortSize, SortDate, ToggleFavorite, Reveal, ShowInFolder, ConnectSftp, SftpAlias, SftpChown, SftpPutty, FavoriteItem, SftpRoot, ViewCycle, ViewDetails, ViewCompact, ViewGrid, ColExt, ColSize, ColDate, QuickLook, CompareToggle, SelectDiff, SyncToOther, TextCompare, EditFile, EditorSettings, Root, ExplorerHere, Terminal, PowerShellHere, CmdHere, ThemeCycle, ThemeSystem, ThemeLight, ThemeDark, Quit,
 ];
 
 pub fn name(a: Action) -> &'static str {
@@ -112,6 +114,7 @@ pub fn name(a: Action) -> &'static str {
         SftpRoot => "SFTP: known connections",
         SftpAlias => "SFTP: set alias for this connection…",
         SftpChown => "SFTP: change Linux owner (chown)…",
+        SftpPutty => "SFTP: open this server in PuTTY (SSH)",
         FavoriteItem => "Add / remove the selected folder to favorites",
         ViewCycle => "View: cycle Details / Compact / Grid",
         ViewDetails => "View: details",
@@ -141,6 +144,7 @@ pub fn name(a: Action) -> &'static str {
         Delete => "Delete (Recycle Bin)",
         DeletePermanent => "Delete permanently",
         Rename => "Rename",
+        Zip => "Zip the selected files / folders…",
         ClipCopy => "Copy",
         ClipCut => "Cut",
         ClipPaste => "Paste",
@@ -216,6 +220,7 @@ pub fn bindings() -> Vec<Binding> {
         b(a.plus(s), Key::C, CmdHere),
         b(a.plus(s), Key::E, ExplorerHere),
         b(a.plus(s), Key::S, SyncToOther),
+        b(a.plus(s), Key::F5, Zip),
         b(cs, Key::M, SelectDiff),
         b(c, Key::M, CompareToggle),
         b(n, Key::F3, QuickLook),

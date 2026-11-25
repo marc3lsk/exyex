@@ -17,6 +17,7 @@ Native (Rust + egui) dual-pane file manager for Windows — a keyboard-first alt
 |---|---|
 | Tab | switch pane |
 | F5 / F6 | copy / move to other pane |
+| Alt+Shift+F5 | zip the selection into a new `.zip` in this folder |
 | F7 / Shift+F4 | new folder / new file |
 | F8, Del / Shift+Del | delete to Recycle Bin / permanently |
 | F2, Shift+F6 | rename |

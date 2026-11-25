@@ -20,11 +20,14 @@ pub enum OpKind {
     Move,
     Trash,
     Delete,
+    /// compress the sources into the zip file given as `dest`
+    Zip,
 }
 
 impl OpKind {
     pub fn verb(self) -> &'static str {
         match self {
+            OpKind::Zip => "Zipping",
             OpKind::Copy => "Copying",
             OpKind::Move => "Moving",
             OpKind::Trash => "Recycling",
@@ -207,6 +210,22 @@ fn run(
     ctx: &egui::Context,
 ) -> Result<(), String> {
     use crate::archive as ar;
+    if kind == OpKind::Zip {
+        let zip = dest.ok_or("no destination")?;
+        let total = ar::tree_total(srcs);
+        let mut done = 0u64;
+        let mut last = Instant::now() - Duration::from_secs(1);
+        let _ = tx.send(Msg::Progress { done: 0, total, current: String::new() });
+        let r = ar::create(srcs, zip, cancel, &mut |n, p| {
+            done += n;
+            if last.elapsed() >= Duration::from_millis(100) {
+                last = Instant::now();
+                let _ = tx.send(Msg::Progress { done, total, current: p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default() });
+                ctx.request_repaint();
+            }
+        });
+        return r;
+    }
     // Writes inside an archive work on its staging copy (the archive is rewritten when the user leaves it).
     let mut kind = kind;
     let mut srcs: Vec<PathBuf> = srcs.to_vec();
@@ -230,6 +249,7 @@ fn run(
     let dest = dest_buf.as_deref();
     let mut errors: Vec<String> = vec![];
     match kind {
+        OpKind::Zip => unreachable!("handled above"),
         OpKind::Trash => {
             let _ = tx.send(Msg::Progress { done: 0, total: 1, current: format!("{} item(s)", srcs.len()) });
             if srcs.iter().any(|s| crate::sftp::is_remote(s)) {

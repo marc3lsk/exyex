@@ -56,6 +56,10 @@ impl Pane {
 enum Dialog {
     NewFolder { text: String, fresh: bool },
     NewFile { text: String, fresh: bool },
+    /// Shift+Alt+F5: compress `paths` into `<current folder>\<text>`.
+    Zip { paths: Vec<PathBuf>, dir: PathBuf, text: String, fresh: bool },
+    /// The zip name already exists in `dir`: replace it or keep both (numbered)?
+    ZipExists { paths: Vec<PathBuf>, dir: PathBuf, name: String },
     SftpAlias { key: String, text: String, fresh: bool },
     Delete { paths: Vec<PathBuf>, permanent: bool },
     /// SFTP: change the Linux owner / group of `paths` (runs `chown` on the server).
@@ -592,6 +596,7 @@ impl App {
                         OpKind::Move => "Moved.",
                         OpKind::Trash => "Moved to Recycle Bin.",
                         OpKind::Delete => "Deleted.",
+                        OpKind::Zip => "Zip created.",
                     }
                     .to_string(),
                     JobState::Cancelled => "Cancelled.".to_string(),
@@ -1027,6 +1032,21 @@ impl App {
                     self.dialog = Some(Dialog::Chown { paths, owner: String::new(), group: String::new(), recursive: true, sudo: false, fresh: true });
                 }
             }
+            SftpPutty => {
+                let loc = crate::sftp::parse(&self.tab().path).or_else(|| self.tab().current().and_then(|e| crate::sftp::parse(&e.path)));
+                let Some(l) = loc else { return self.say("Open an SFTP server first") };
+                let args = ["-ssh".to_string(), format!("{}@{}", l.user, l.host), "-P".to_string(), l.port.to_string()];
+                let candidates = [
+                    "putty.exe".to_string(),
+                    r"C:\Program Files\PuTTY\putty.exe".to_string(),
+                    r"C:\Program Files (x86)\PuTTY\putty.exe".to_string(),
+                ];
+                if candidates.iter().any(|c| std::process::Command::new(c).args(&args).spawn().is_ok()) {
+                    self.say(format!("PuTTY: {}@{}", l.user, l.host));
+                } else {
+                    self.say("⚠ Could not start putty.exe – install PuTTY or add it to PATH");
+                }
+            }
             ConnectSftp => {
                 self.panes[pi].path_edit = Some(PathEdit { orig: String::new(), text: "sftp://".into(), fresh: true, sugg_for: String::from("\u{1}"), sugg: vec![], sel: None, popup_rect: Rect::NOTHING });
                 self.say("Type sftp://user@host[:port]/path – keys come from Pageant");
@@ -1123,6 +1143,23 @@ impl App {
             }
             NewFolder => self.dialog = Some(Dialog::NewFolder { text: "New folder".into(), fresh: true }),
             NewFile => self.dialog = Some(Dialog::NewFile { text: "New file.txt".into(), fresh: true }),
+            Zip => {
+                let paths = self.tab().targets();
+                let dir = self.tab().path.clone();
+                if paths.is_empty() {
+                    return;
+                }
+                if crate::sftp::is_remote(&dir) || crate::archive::in_archive(&dir) || paths.iter().any(|p| crate::sftp::is_remote(p) || crate::archive::in_archive(p)) {
+                    return self.say("Zipping works on local files only");
+                }
+                let base = match paths.as_slice() {
+                    [one] => one.file_stem().or(one.file_name()).map(|n| n.to_string_lossy().into_owned()),
+                    _ => dir.file_name().map(|n| n.to_string_lossy().into_owned()),
+                }
+                .unwrap_or_else(|| "archive".into());
+                let name = format!("{base}.zip");
+                self.dialog = Some(Dialog::Zip { paths, dir, text: name, fresh: true });
+            }
             Delete | DeletePermanent => {
                 let paths = self.tab().targets();
                 if !paths.is_empty() {
@@ -1892,12 +1929,15 @@ impl App {
         let (esc, enter) = ctx.input_mut(|i| (i.consume_key(Modifiers::NONE, Key::Escape), !keeps_enter && i.consume_key(Modifiers::NONE, Key::Enter)));
         let mut arch_choice: Option<bool> = None; // Some(true) = update, Some(false) = discard
         let mut conflict_choice: Option<ops::Policy> = None;
+        let mut zip_choice: Option<bool> = None; // Some(true) = keep both, Some(false) = replace
         let mut ok = enter;
         let mut cancel = esc;
 
         let title = match &dlg {
             Dialog::NewFolder { .. } => "New folder",
             Dialog::NewFile { .. } => "New file",
+            Dialog::Zip { .. } => "Zip",
+            Dialog::ZipExists { .. } => "Archive already exists",
             Dialog::SftpAlias { .. } => "SFTP alias",
             Dialog::Chown { .. } => "Change owner",
             Dialog::Editor { .. } => "Editor for F4",
@@ -1973,6 +2013,31 @@ impl App {
                         text_field(ui, text, fresh, None)
                     }
                     Dialog::NewFile { text, fresh } => {
+                        let n = stem_len(text);
+                        text_field(ui, text, fresh, Some(n))
+                    }
+                    Dialog::ZipExists { name, .. } => {
+                        ui.label(format!("\"{name}\" already exists in this folder."));
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            let keep = ui.add(egui::Button::new(" Keep both ").fill(ACCENT.gamma_multiply(0.75))).on_hover_text("Create \"name (2).zip\"");
+                            accent_hover(ui, &keep);
+                            if ctx.memory(|m| m.focused().is_none()) {
+                                keep.request_focus();
+                            }
+                            if keep.clicked() {
+                                zip_choice = Some(true);
+                            }
+                            if ui.button("Replace").clicked() {
+                                zip_choice = Some(false);
+                            }
+                            if ui.button("Cancel").clicked() {
+                                cancel = true;
+                            }
+                        });
+                    }
+                    Dialog::Zip { paths, text, fresh, .. } => {
+                        ui.label(if paths.len() == 1 { format!("Zip \"{}\" into:", display_name(&paths[0])) } else { format!("Zip {} items into:", paths.len()) });
                         let n = stem_len(text);
                         text_field(ui, text, fresh, Some(n))
                     }
@@ -2063,7 +2128,7 @@ impl App {
                     }
                 }
                 ui.add_space(6.0);
-                if matches!(dlg, Dialog::ArchiveUpdate { .. } | Dialog::Conflict { .. }) {
+                if matches!(dlg, Dialog::ArchiveUpdate { .. } | Dialog::Conflict { .. } | Dialog::ZipExists { .. }) {
                     return;
                 }
                 ui.horizontal(|ui| {
@@ -2104,6 +2169,19 @@ impl App {
             }
             return;
         }
+        if let (Some(keep_both), Dialog::ZipExists { paths, dir, name }) = (zip_choice, &dlg) {
+            let mut target = dir.join(name);
+            if keep_both {
+                target = ops::unique_dest(dir, std::ffi::OsStr::new(name));
+            }
+            let srcs: Vec<PathBuf> = paths.iter().filter(|p| **p != target).cloned().collect();
+            if srcs.is_empty() {
+                return self.say("⚠ Nothing to zip");
+            }
+            let ctx = ctx.clone();
+            self.spawn_op(&ctx, OpKind::Zip, srcs, Some(target), HashMap::new());
+            return;
+        }
         if let (Some(update), Dialog::ArchiveUpdate { zip, quit }) = (arch_choice, &dlg) {
             let (zip, quit) = (zip.clone(), *quit);
             if update {
@@ -2141,6 +2219,27 @@ impl App {
                 Dialog::ArchiveUpdate { .. } | Dialog::Conflict { .. } => {}
                 Dialog::NewFolder { text, .. } => self.do_create(text.trim(), true),
                 Dialog::NewFile { text, .. } => self.do_create(text.trim(), false),
+                Dialog::Zip { paths, dir, text, .. } => {
+                    let mut name = text.trim().to_string();
+                    if let Err(e) = validate_name(&name) {
+                        self.dialog = Some(Dialog::Zip { paths, dir, text, fresh: false });
+                        return self.say(format!("⚠ {e}"));
+                    }
+                    if !name.to_lowercase().ends_with(".zip") {
+                        name.push_str(".zip");
+                    }
+                    let target = dir.join(&name);
+                    if paths.iter().any(|p| target.starts_with(p)) {
+                        return self.say("⚠ The archive can't be created inside a folder being zipped");
+                    }
+                    if target.exists() {
+                        self.dialog = Some(Dialog::ZipExists { paths, dir, name });
+                    } else {
+                        let ctx = ctx.clone();
+                        self.spawn_op(&ctx, OpKind::Zip, paths, Some(target), HashMap::new());
+                    }
+                }
+                Dialog::ZipExists { .. } => {}
                 Dialog::SftpAlias { key, text, .. } => self.set_alias(&key, text.trim()),
                 Dialog::Chown { paths, owner, group, recursive, sudo, .. } => {
                     if owner.trim().is_empty() && group.trim().is_empty() {
@@ -2637,6 +2736,10 @@ Search inside the files, in all subfolders.\nShows the first matching line. Bina
                         ui.close();
                     }
                 }
+                if crate::sftp::parse(&tab.path).is_some() && ui.button("Open in PuTTY").clicked() {
+                    evs.push(Ev::Run(Action::SftpPutty));
+                    ui.close();
+                }
             });
             if let Some(err) = &tab.error {
                 ui.colored_label(ui.visuals().error_fg_color, format!("⚠ {err}"));
@@ -3055,6 +3158,7 @@ fn item_interact(ui: &mut Ui, resp: &egui::Response, pi: usize, vi: usize, e: &E
             ("Rename", Action::Rename),
             ("Copy to other pane", Action::Copy),
             ("Move to other pane", Action::Move),
+            ("Zip…  (Alt+Shift+F5)", Action::Zip),
             ("Copy", Action::ClipCopy),
             ("Cut", Action::ClipCut),
             ("Paste", Action::ClipPaste),
@@ -3075,6 +3179,10 @@ fn item_interact(ui: &mut Ui, resp: &egui::Response, pi: usize, vi: usize, e: &E
         }
         if crate::sftp::is_remote(&e.path) && !e.is_up && ui.button("Change owner (chown)…").clicked() {
             evs.push(Ev::Run(Action::SftpChown));
+            ui.close();
+        }
+        if crate::sftp::is_remote(&e.path) && ui.button("Open in PuTTY").clicked() {
+            evs.push(Ev::Run(Action::SftpPutty));
             ui.close();
         }
         if crate::sftp::is_remote(&e.path) && ui.button("SFTP alias…").clicked() {
@@ -3186,7 +3294,7 @@ fn job_row(ui: &mut Ui, j: &mut Job, dismiss: &mut Vec<u64>) {
             ui.add(egui::ProgressBar::new(frac).desired_width(ui.available_width()).show_percentage().animate(indeterminate));
             let el = j.started.elapsed().as_secs_f64().max(0.001);
             let info = match j.kind {
-                OpKind::Copy | OpKind::Move if j.total > 0 => {
+                OpKind::Copy | OpKind::Move | OpKind::Zip if j.total > 0 => {
                     let rate = j.done as f64 / el;
                     let left = if rate > 1.0 && j.total > j.done { (j.total - j.done) as f64 / rate } else { 0.0 };
                     let eta = if left > 0.5 && el > 1.5 { format!(" · {} left", fmt_dur(left)) } else { String::new() };

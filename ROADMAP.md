@@ -26,6 +26,7 @@ Legenda: ✅ hotové · 🟡 rozpracované / čiastočné · ⬜ nápad
 - ✅ **Konfigurovateľný editor pre F4** – príkaz s `{file}` `{dir}` `{line}` + pravidlá podľa prípony (paleta → *Settings: editor for F4*); predvolene Notepad. F4 na priečinku otvorí úpravu cesty.
 - ✅ **Úprava obsahu zipu** – kopírovanie / presun dnu a von, mazanie, premenovanie, nový súbor / priečinok a F4 pracujú nad pracovnou kópiou; po opustení zipu (a pri ukončení) sa opýta, či zip aktualizovať.
 - ✅ **F4 na SFTP súboroch** – stiahne, otvorí editor a po každom uložení nahrá súbor späť na server.
+- ✅ **Zipovanie výberu** – `Alt+Shift+F5` / kontextové menu / paleta: vybrané súbory a priečinky sa zabalia do nového `.zip` v aktuálnom priečinku (názov sa dá upraviť), beží na pozadí s progresom a Cancel.
 - ⬜ **Workspaces** – uložená sada tabov v oboch paneloch, prepínanie jedným príkazom.
 - ⬜ **Veľkosti priečinkov** v stĺpci Size (počítané na pozadí) + prehľad využitia disku.
 - ✅ **Iné zobrazenia** – Details / Compact / Grid s náhľadmi obrázkov, voliteľné stĺpce (Type, Size, Modified).

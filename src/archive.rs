@@ -247,6 +247,68 @@ pub fn save(zip: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Total bytes of `srcs` (files and folders) – used as the progress total when zipping.
+pub fn tree_total(srcs: &[PathBuf]) -> u64 {
+    srcs.iter().map(|s| tree_bytes(s).max(1)).sum()
+}
+
+/// Compresses `srcs` (files / folders, each stored under its own name) into a new zip at `zip_path`.
+/// Written to a temp file first; removed again on error or cancel.
+pub fn create(srcs: &[PathBuf], zip_path: &Path, cancel: &AtomicBool, progress: &mut dyn FnMut(u64, &Path)) -> Result<(), String> {
+    let tmp = zip_path.with_extension("exyex-tmp");
+    let r = (|| -> Result<(), String> {
+        let mut w = zip::ZipWriter::new(File::create(&tmp).map_err(|e| e.to_string())?);
+        for s in srcs {
+            let Some(name) = s.file_name() else { continue };
+            add_tree(&mut w, s, &name.to_string_lossy(), cancel, progress)?;
+        }
+        w.finish().map_err(|e| e.to_string())?;
+        // replaces an existing file (the caller has already asked the user)
+        std::fs::rename(&tmp, zip_path).map_err(|e| e.to_string())
+    })();
+    if r.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    r
+}
+
+fn add_tree(w: &mut zip::ZipWriter<File>, path: &Path, name: &str, cancel: &AtomicBool, progress: &mut dyn FnMut(u64, &Path)) -> Result<(), String> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err("Cancelled".into());
+    }
+    let md = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut o = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated).large_file(md.len() > u32::MAX as u64);
+    if let Some(t) = md.modified().ok().and_then(zip_time) {
+        o = o.last_modified_time(t);
+    }
+    if md.is_dir() {
+        w.add_directory(format!("{name}/"), o).map_err(|e| e.to_string())?;
+        for e in std::fs::read_dir(path).map_err(|e| format!("{}: {e}", path.display()))?.flatten() {
+            add_tree(w, &e.path(), &format!("{name}/{}", e.file_name().to_string_lossy()), cancel, progress)?;
+        }
+        progress(1, path);
+    } else {
+        w.start_file(name, o).map_err(|e| e.to_string())?;
+        let mut f = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut buf = vec![0u8; 1 << 20];
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                return Err("Cancelled".into());
+            }
+            let n = f.read(&mut buf).map_err(|e| format!("{}: {e}", path.display()))?;
+            if n == 0 {
+                break;
+            }
+            io::Write::write_all(w, &buf[..n]).map_err(|e| e.to_string())?;
+            progress(n as u64, path);
+        }
+        if md.len() == 0 {
+            progress(1, path);
+        }
+    }
+    Ok(())
+}
+
 fn list_dir(zip: &Path, dir: &Path, inner: &str) -> io::Result<Vec<Entry>> {
     let prefix = if inner.is_empty() { String::new() } else { format!("{inner}/") };
     let mut out = vec![];
@@ -463,6 +525,27 @@ mod tests {
         extract(&zp, "d", &out, &AtomicBool::new(false), &mut |_| {}).unwrap();
         assert_eq!(std::fs::read_to_string(out.join("b.txt")).unwrap(), "world!");
         assert_eq!(read_head(&zp, "a.txt", 3).unwrap(), b"hel");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn create_zip_from_files_and_folders() {
+        let root = std::env::temp_dir().join(format!("exyex-zipcreate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("dir/sub")).unwrap();
+        std::fs::write(root.join("dir/sub/x.txt"), "xx").unwrap();
+        std::fs::write(root.join("f.txt"), "hello").unwrap();
+        let zp = root.join("out.zip");
+        let srcs = vec![root.join("dir"), root.join("f.txt")];
+        let mut got = 0;
+        create(&srcs, &zp, &AtomicBool::new(false), &mut |n, _| got += n).unwrap();
+        assert!(got >= 7);
+        let top: Vec<_> = list(&zp, "").unwrap().into_iter().map(|e| e.name).collect();
+        assert_eq!(top, vec!["dir".to_string(), "f.txt".to_string()]);
+        assert_eq!(list(&zp, "dir/sub").unwrap()[0].size, 2);
+        create(&srcs[1..], &zp, &AtomicBool::new(false), &mut |_, _| {}).unwrap(); // replaces
+        assert_eq!(list(&zp, "").unwrap().len(), 1);
+        assert!(!zp.with_extension("exyex-tmp").exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 
