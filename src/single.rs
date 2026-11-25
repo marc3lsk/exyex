@@ -1,4 +1,4 @@
-//! Single-instance support: a second `exyex <path>` hands the path to the
+//! Single-instance support: a second `mavyex <path>` hands the path to the
 //! running window (which opens it as a new tab) and exits.
 //!
 //! Detection uses a named mutex; the path travels over a per-user named pipe
@@ -61,8 +61,8 @@ pub fn init(args: &[String]) -> Init {
     };
 
     let user = std::env::var("USERNAME").unwrap_or_default();
-    let mutex_name: Vec<u16> = format!("Local\\exyex-instance-{user}").encode_utf16().chain(Some(0)).collect();
-    let pipe_path = format!(r"\\.\pipe\exyex-{user}");
+    let mutex_name: Vec<u16> = format!("Local\\mavyex-instance-{user}").encode_utf16().chain(Some(0)).collect();
+    let pipe_path = format!(r"\\.\pipe\mavyex-{user}");
 
     let mutex = unsafe { CreateMutexW(None, false, PCWSTR(mutex_name.as_ptr())) };
     let Ok(mutex) = mutex else { return Init::Standalone };
@@ -70,7 +70,7 @@ pub fn init(args: &[String]) -> Init {
     std::mem::forget(mutex); // held for the lifetime of the process
 
     if already_running {
-        // Resolve relative paths ("exyex .") against *our* working directory.
+        // Resolve relative paths ("mavyex .") against *our* working directory.
         let cwd = std::env::current_dir().unwrap_or_default();
         let path = args
             .first()

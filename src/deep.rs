@@ -221,7 +221,7 @@ mod tests {
 
     #[test]
     fn finds_nested_and_honours_exclude() {
-        let root = std::env::temp_dir().join(format!("exyex-deep-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("mavyex-deep-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("a").join("b")).unwrap();
         std::fs::create_dir_all(root.join("node_modules").join("x")).unwrap();
@@ -237,7 +237,7 @@ mod tests {
 
     #[test]
     fn content_search_reports_first_line_and_skips_binary() {
-        let root = std::env::temp_dir().join(format!("exyex-grep-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("mavyex-grep-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("sub")).unwrap();
         std::fs::write(root.join("one.txt"), "alpha\nthe needle here\nneedle again\n").unwrap();

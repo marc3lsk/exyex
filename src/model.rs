@@ -847,7 +847,7 @@ mod rename_tests {
 
     #[test]
     fn renamed_result_stays_in_the_filtered_list() {
-        let root = std::env::temp_dir().join(format!("exyex-ren-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("mavyex-ren-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("report.txt"), "x").unwrap();

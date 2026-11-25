@@ -1,4 +1,4 @@
-# exyex – roadmap / nápady
+# mavyex – roadmap / nápady
 
 Legenda: ✅ hotové · 🟡 rozpracované / čiastočné · ⬜ nápad
 
@@ -6,7 +6,7 @@ Legenda: ✅ hotové · 🟡 rozpracované / čiastočné · ⬜ nápad
 - ✅ **Asynchrónne načítanie priečinkov** – pomalé / sieťové priečinky už nezasekávajú UI (starý obsah zostane, naviguje sa na pozadí).
 - ✅ **Preusporiadanie tabov ťahaním** v rámci jedného panelu.
 - ✅ **Zapamätanie okien** – pozícia a veľkosť hlavného okna aj okna operácií (aj maximalizované).
-- ⬜ **„Open in exyex" v kontextovom menu Explorera** (záznam v registri, pridať do inštalátora).
+- ⬜ **„Open in mavyex" v kontextovom menu Explorera** (záznam v registri, pridať do inštalátora).
 - ✅ **Klávesové skratky** pre PowerShell / cmd / Explorer tu, pridanie do favorites z návrhov (`Ctrl+B`).
 
 ## Veľké funkcie

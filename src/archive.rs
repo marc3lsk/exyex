@@ -99,7 +99,7 @@ fn staging_dir(zip: &Path) -> PathBuf {
     key(zip).hash(&mut h);
     std::process::id().hash(&mut h);
     let name = zip.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    std::env::temp_dir().join("exyex-archive-edit").join(format!("{:x}-{name}", h.finish()))
+    std::env::temp_dir().join("mavyex-archive-edit").join(format!("{:x}-{name}", h.finish()))
 }
 
 /// Staging folder of the archive, if it is being edited.
@@ -221,7 +221,7 @@ pub fn save(zip: &Path) -> Result<(), String> {
     walk(&dir, "", &mut items).map_err(|e| e.to_string())?;
     // jar convention: META-INF/ (with the manifest) first
     items.sort_by_key(|(n, _, _)| !n.starts_with("META-INF/"));
-    let tmp = zip.with_extension("exyex-tmp");
+    let tmp = zip.with_extension("mavyex-tmp");
     let r = (|| -> Result<(), String> {
         let mut w = zip::ZipWriter::new(File::create(&tmp).map_err(|e| e.to_string())?);
         for (name, path, is_dir) in &items {
@@ -255,7 +255,7 @@ pub fn tree_total(srcs: &[PathBuf]) -> u64 {
 /// Compresses `srcs` (files / folders, each stored under its own name) into a new zip at `zip_path`.
 /// Written to a temp file first; removed again on error or cancel.
 pub fn create(srcs: &[PathBuf], zip_path: &Path, cancel: &AtomicBool, progress: &mut dyn FnMut(u64, &Path)) -> Result<(), String> {
-    let tmp = zip_path.with_extension("exyex-tmp");
+    let tmp = zip_path.with_extension("mavyex-tmp");
     let r = (|| -> Result<(), String> {
         let mut w = zip::ZipWriter::new(File::create(&tmp).map_err(|e| e.to_string())?);
         for s in srcs {
@@ -484,7 +484,7 @@ pub fn extract_temp(zip: &Path, inner: &str) -> Result<PathBuf, String> {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     zip.hash(&mut h);
     std::fs::metadata(zip).and_then(|m| m.modified()).ok().hash(&mut h);
-    let dir = std::env::temp_dir().join("exyex-archive").join(format!("{:x}", h.finish()));
+    let dir = std::env::temp_dir().join("mavyex-archive").join(format!("{:x}", h.finish()));
     let name = inner.rsplit('/').next().unwrap_or(inner);
     let target = dir.join(name);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -501,7 +501,7 @@ mod tests {
 
     #[test]
     fn browse_and_extract_zip() {
-        let root = std::env::temp_dir().join(format!("exyex-zip-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("mavyex-zip-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let zp = root.join("t.zip");
@@ -530,7 +530,7 @@ mod tests {
 
     #[test]
     fn create_zip_from_files_and_folders() {
-        let root = std::env::temp_dir().join(format!("exyex-zipcreate-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("mavyex-zipcreate-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("dir/sub")).unwrap();
         std::fs::write(root.join("dir/sub/x.txt"), "xx").unwrap();
@@ -545,13 +545,13 @@ mod tests {
         assert_eq!(list(&zp, "dir/sub").unwrap()[0].size, 2);
         create(&srcs[1..], &zp, &AtomicBool::new(false), &mut |_, _| {}).unwrap(); // replaces
         assert_eq!(list(&zp, "").unwrap().len(), 1);
-        assert!(!zp.with_extension("exyex-tmp").exists());
+        assert!(!zp.with_extension("mavyex-tmp").exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn edit_session_writes_changes_back() {
-        let root = std::env::temp_dir().join(format!("exyex-zipedit-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("mavyex-zipedit-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let zp = root.join("e.zip");
@@ -581,7 +581,7 @@ mod tests {
         inner.sort();
         assert_eq!(inner, vec!["new.txt".to_string()]);
         assert_eq!(read_head(&zp, "renamed.txt", 100).unwrap(), b"hello");
-        assert!(!root.join("e.exyex-tmp").exists());
+        assert!(!root.join("e.mavyex-tmp").exists());
         // an untouched session is not dirty, and discarding drops the working copy
         ensure(&zp).unwrap();
         assert!(!is_dirty(&zp));

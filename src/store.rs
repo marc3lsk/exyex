@@ -166,8 +166,18 @@ fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
+/// `%APPDATA%\mavyex`; a settings folder left by the former name (`exyex`) is moved there once.
+pub fn config_dir() -> Option<PathBuf> {
+    let base = dirs::config_dir()?;
+    let (new, old) = (base.join("mavyex"), base.join("exyex"));
+    if !new.exists() && old.is_dir() {
+        let _ = std::fs::rename(&old, &new);
+    }
+    Some(new)
+}
+
 fn file() -> Option<PathBuf> {
-    Some(dirs::config_dir()?.join("exyex").join("state.json"))
+    Some(config_dir()?.join("state.json"))
 }
 
 impl Store {

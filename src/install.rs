@@ -1,7 +1,7 @@
 //! Per-user install / uninstall (no admin rights, no external installer):
-//!   exyex --install     copy to %LOCALAPPDATA%\Programs\exyex, add to the user PATH,
+//!   mavyex --install     copy to %LOCALAPPDATA%\Programs\mavyex, add to the user PATH,
 //!                       register in "Apps & features", create a Start menu shortcut
-//!   exyex --uninstall   undo all of that
+//!   mavyex --uninstall   undo all of that
 //! A copy of the exe named `*_setup.exe` runs `--install` with prompts when double-clicked.
 
 use std::{borrow::Cow, env, fs, io, os::windows::process::CommandExt, path::PathBuf, process::Command};
@@ -14,15 +14,15 @@ use windows::{
 };
 use winreg::{RegKey, RegValue, enums::*};
 
-const UNINSTALL_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\exyex";
+const UNINSTALL_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\mavyex";
 const NO_WINDOW: u32 = 0x0800_0000;
 
 fn install_dir() -> PathBuf {
-    PathBuf::from(env::var_os("LOCALAPPDATA").unwrap_or_default()).join("Programs").join("exyex")
+    PathBuf::from(env::var_os("LOCALAPPDATA").unwrap_or_default()).join("Programs").join("mavyex")
 }
 
 fn shortcut_path() -> PathBuf {
-    PathBuf::from(env::var_os("APPDATA").unwrap_or_default()).join(r"Microsoft\Windows\Start Menu\Programs\exyex.lnk")
+    PathBuf::from(env::var_os("APPDATA").unwrap_or_default()).join(r"Microsoft\Windows\Start Menu\Programs\mavyex.lnk")
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -89,12 +89,12 @@ pub fn install() -> Result<PathBuf, String> {
     let err = |what: &str, e: &dyn std::fmt::Display| format!("{what}: {e}");
     let exe = env::current_exe().map_err(|e| err("cannot locate this exe", &e))?;
     let dir = install_dir();
-    let dest = dir.join("exyex.exe");
+    let dest = dir.join("mavyex.exe");
     fs::create_dir_all(&dir).map_err(|e| err("cannot create install folder", &e))?;
 
     let same = fs::canonicalize(&exe).ok() == fs::canonicalize(&dest).ok();
     if !same {
-        fs::copy(&exe, &dest).map_err(|e| format!("Could not copy to {}: {e}\n\nIs exyex running? Close it and try again.", dest.display()))?;
+        fs::copy(&exe, &dest).map_err(|e| format!("Could not copy to {}: {e}\n\nIs mavyex running? Close it and try again.", dest.display()))?;
     }
 
     // PATH (user scope)
@@ -109,9 +109,9 @@ pub fn install() -> Result<PathBuf, String> {
     // "Apps & features" entry
     let (u, _) = RegKey::predef(HKEY_CURRENT_USER).create_subkey(UNINSTALL_KEY).map_err(|e| err("cannot register uninstaller", &e))?;
     let exe_str = dest.to_string_lossy().into_owned();
-    let _ = u.set_value("DisplayName", &"exyex");
+    let _ = u.set_value("DisplayName", &"mavyex");
     let _ = u.set_value("DisplayVersion", &env!("CARGO_PKG_VERSION"));
-    let _ = u.set_value("Publisher", &"exyex");
+    let _ = u.set_value("Publisher", &"mavyex");
     let _ = u.set_value("InstallLocation", &dir_str);
     let _ = u.set_value("DisplayIcon", &exe_str);
     let _ = u.set_value("UninstallString", &format!("\"{exe_str}\" --uninstall"));
@@ -151,48 +151,48 @@ pub fn uninstall() -> Result<(), String> {
 
 // --------------------------------------------------------- entry points
 
-/// `exyex --install` / `exyex --uninstall`: silent apart from the result box.
+/// `mavyex --install` / `mavyex --uninstall`: silent apart from the result box.
 pub fn run_cli(uninstall_mode: bool) {
     if uninstall_mode {
         match uninstall() {
             Ok(()) => {
-                msgbox("exyex", "exyex was removed from your PATH and uninstalled.\nYour settings in %APPDATA%\\exyex were kept.", MB_OK | MB_ICONINFORMATION);
+                msgbox("mavyex", "mavyex was removed from your PATH and uninstalled.\nYour settings in %APPDATA%\\mavyex were kept.", MB_OK | MB_ICONINFORMATION);
             }
             Err(e) => {
-                msgbox("exyex uninstall failed", &e, MB_OK | MB_ICONERROR);
+                msgbox("mavyex uninstall failed", &e, MB_OK | MB_ICONERROR);
             }
         }
     } else {
         match install() {
             Ok(dest) => {
                 msgbox(
-                    "exyex",
-                    &format!("Installed to {}\n\nOpen a NEW terminal and type:  exyex .", dest.display()),
+                    "mavyex",
+                    &format!("Installed to {}\n\nOpen a NEW terminal and type:  mavyex .", dest.display()),
                     MB_OK | MB_ICONINFORMATION,
                 );
             }
             Err(e) => {
-                msgbox("exyex install failed", &e, MB_OK | MB_ICONERROR);
+                msgbox("mavyex install failed", &e, MB_OK | MB_ICONERROR);
             }
         }
     }
 }
 
-/// Double-clicked `exyex_<ver>_x64_setup.exe`: ask, install, offer to launch.
+/// Double-clicked `mavyex_<ver>_x64_setup.exe`: ask, install, offer to launch.
 pub fn run_setup_wizard() {
     let ask = format!(
-        "Install exyex {} for the current user?\n\n\u{2022} copies it to {}\n\u{2022} adds it to your PATH, so \"exyex .\" works in any terminal\n\u{2022} adds a Start menu shortcut",
+        "Install mavyex {} for the current user?\n\n\u{2022} copies it to {}\n\u{2022} adds it to your PATH, so \"mavyex .\" works in any terminal\n\u{2022} adds a Start menu shortcut",
         env!("CARGO_PKG_VERSION"),
         install_dir().display()
     );
-    if msgbox("exyex setup", &ask, MB_YESNO | MB_ICONQUESTION) != IDYES {
+    if msgbox("mavyex setup", &ask, MB_YESNO | MB_ICONQUESTION) != IDYES {
         return;
     }
     match install() {
         Ok(dest) => {
             let r = msgbox(
-                "exyex setup",
-                "Installation finished.\n\nOpen a NEW terminal and type:  exyex .\n\nStart exyex now?",
+                "mavyex setup",
+                "Installation finished.\n\nOpen a NEW terminal and type:  mavyex .\n\nStart mavyex now?",
                 MB_YESNO | MB_ICONINFORMATION,
             );
             if r == IDYES {
@@ -200,7 +200,7 @@ pub fn run_setup_wizard() {
             }
         }
         Err(e) => {
-            msgbox("exyex setup failed", &e, MB_OK | MB_ICONERROR);
+            msgbox("mavyex setup failed", &e, MB_OK | MB_ICONERROR);
         }
     }
 }

@@ -29,7 +29,7 @@ fn main() -> eframe::Result {
             Some("--uninstall") => return Ok(install::run_cli(true)),
             _ => {}
         }
-        // `exyex_<ver>_x64_setup.exe` double-clicked: run the setup wizard.
+        // `mavyex_<ver>_x64_setup.exe` double-clicked: run the setup wizard.
         let is_setup = std::env::current_exe()
             .ok()
             .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().to_lowercase()))
@@ -39,7 +39,7 @@ fn main() -> eframe::Result {
         }
     }
 
-    // One window only: a second `exyex <path>` hands the path to the running
+    // One window only: a second `mavyex <path>` hands the path to the running
     // instance (opens a new tab there) and exits.
     let server = match single::init(&args) {
         single::Init::Forwarded => return Ok(()),
@@ -48,7 +48,7 @@ fn main() -> eframe::Result {
     };
 
     let saved = store::Store::load().window.filter(|w| w.on_screen());
-    let mut viewport = eframe::egui::ViewportBuilder::default().with_title("exyex").with_inner_size([1360.0, 820.0]);
+    let mut viewport = eframe::egui::ViewportBuilder::default().with_title("mavyex").with_inner_size([1360.0, 820.0]);
     if let Some(w) = saved {
         viewport = viewport.with_inner_size([w.w, w.h]).with_position([w.x, w.y]).with_maximized(w.maximized);
     }
@@ -59,5 +59,5 @@ fn main() -> eframe::Result {
             .with_icon(eframe::egui::IconData { rgba: icon_draw::render_icon(64), width: 64, height: 64 }),
         ..Default::default()
     };
-    eframe::run_native("exyex", options, Box::new(move |cc| Ok(Box::new(app::App::new(cc, server)))))
+    eframe::run_native("mavyex", options, Box::new(move |cc| Ok(Box::new(app::App::new(cc, server)))))
 }

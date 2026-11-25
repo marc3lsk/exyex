@@ -479,7 +479,7 @@ mod tests {
     use std::time::Duration;
 
     fn temp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("exyex-test-{}-{}", std::process::id(), name));
+        let d = std::env::temp_dir().join(format!("mavyex-test-{}-{}", std::process::id(), name));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d

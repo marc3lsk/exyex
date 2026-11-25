@@ -1514,31 +1514,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "exyex"
-version = "0.1.7"
-dependencies = [
- "chrono",
- "dirs",
- "eframe",
- "image",
- "notify",
- "open",
- "regex",
- "resvg",
- "russh",
- "russh-sftp",
- "serde",
- "serde_json",
- "similar",
- "tokio",
- "trash",
- "windows",
- "winreg",
- "winresource",
- "zip",
-]
-
-[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2659,6 +2634,31 @@ name = "log"
 version = "0.4.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
+
+[[package]]
+name = "mavyex"
+version = "0.1.7"
+dependencies = [
+ "chrono",
+ "dirs",
+ "eframe",
+ "image",
+ "notify",
+ "open",
+ "regex",
+ "resvg",
+ "russh",
+ "russh-sftp",
+ "serde",
+ "serde_json",
+ "similar",
+ "tokio",
+ "trash",
+ "windows",
+ "winreg",
+ "winresource",
+ "zip",
+]
 
 [[package]]
 name = "md5"

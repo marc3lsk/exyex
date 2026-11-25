@@ -2,7 +2,7 @@
 .SYNOPSIS
   Bumps the app version in every place it is stored.
 .DESCRIPTION
-  Updates Cargo.toml and the exyex entry of Cargo.lock so they never drift apart
+  Updates Cargo.toml and the mavyex entry of Cargo.lock so they never drift apart
   (the version is baked into the exe via CARGO_PKG_VERSION and used by release.ps1).
 .PARAMETER Part
   patch (default), minor or major.
@@ -60,10 +60,10 @@ $rx = [regex]::new('(?m)^(version\s*=\s*")[^"]+(")')
 Write-Text 'Cargo.toml' ($rx.Replace($toml, "`${1}$new`${2}", 1))
 Write-Host "  $(if ($DryRun) { 'would update' } else { 'updated' }) Cargo.toml"
 
-# Cargo.lock: only the exyex package entry
+# Cargo.lock: only the mavyex package entry
 if (Test-Path 'Cargo.lock') {
     $cl = Read-Text 'Cargo.lock'
-    $rx = [regex]::new('(name = "exyex"\r?\nversion = ")[^"]+(")')
+    $rx = [regex]::new('(name = "mavyex"\r?\nversion = ")[^"]+(")')
     if ($rx.IsMatch($cl)) {
         Write-Text 'Cargo.lock' ($rx.Replace($cl, "`${1}$new`${2}", 1))
         Write-Host "  $(if ($DryRun) { 'would update' } else { 'updated' }) Cargo.lock"

@@ -1,6 +1,6 @@
 //! SFTP browsing and transfers over SSH (pure-Rust `russh`), authenticated
 //! through the running **Pageant** agent (no passwords or key files are
-//! handled by exyex).
+//! handled by mavyex).
 //!
 //! Remote locations are "virtual" paths: `sftp:\user@host[:port]\~\docs\x.txt`
 //! (`~` = the remote home folder). Everything that works on a `Path` (tabs,
@@ -210,7 +210,7 @@ fn join_remote(dir: &str, name: &str) -> String {
 // ------------------------------------------------------------ known hosts
 
 fn hosts_file() -> Option<PathBuf> {
-    Some(dirs::config_dir()?.join("exyex").join("known_hosts.json"))
+    Some(crate::store::config_dir()?.join("known_hosts.json"))
 }
 
 /// Trust on first use: remember the host key fingerprint, refuse when it changes.
@@ -761,7 +761,7 @@ pub fn fetch_temp(p: &Path) -> Result<PathBuf, String> {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     p.hash(&mut h);
-    let dir = std::env::temp_dir().join("exyex-sftp").join(format!("{:x}", h.finish()));
+    let dir = std::env::temp_dir().join("mavyex-sftp").join(format!("{:x}", h.finish()));
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let name = p.file_name().ok_or("no file name")?;
     let target = dir.join(name);
@@ -808,11 +808,11 @@ mod tests {
     }
 
     /// Manual check (needs Pageant with a key and a reachable server):
-    /// `EXYEX_SFTP_TEST=sftp://user@host/ cargo test sftp_live -- --ignored --nocapture`
+    /// `MAVYEX_SFTP_TEST=sftp://user@host/ cargo test sftp_live -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn sftp_live() {
-        let url = std::env::var("EXYEX_SFTP_TEST").expect("set EXYEX_SFTP_TEST");
+        let url = std::env::var("MAVYEX_SFTP_TEST").expect("set MAVYEX_SFTP_TEST");
         let p = from_url(&url).unwrap();
         let items = list(&p).unwrap();
         for e in items.iter().take(20) {

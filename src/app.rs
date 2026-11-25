@@ -186,7 +186,7 @@ pub struct App {
     /// Pending slow-second-click rename: (pane, dir, path, time of click).
     rename_timer: Option<(usize, PathBuf, PathBuf, Instant)>,
     prev_active: usize,
-    /// Requests from later `exyex <path>` launches (open as a tab here).
+    /// Requests from later `mavyex <path>` launches (open as a tab here).
     ipc: Option<crate::single::Server>,
     /// Tab being dragged to the other pane: (pane, tab index).
     tab_drag: Option<(usize, usize)>,
@@ -440,7 +440,7 @@ impl App {
             quit: false,
             store,
         };
-        // `exyex <folder>` opens the folder in a new tab of the active pane.
+        // `mavyex <folder>` opens the folder in a new tab of the active pane.
         if let Some(arg) = std::env::args().nth(1) {
             if let Some(p) = parse_user_path(&arg, &std::env::current_dir().unwrap_or_default()) {
                 if p.is_dir() {
@@ -613,7 +613,7 @@ impl App {
         }
     }
 
-    /// `exyex <path>` from another terminal: show the folder as a tab in this window.
+    /// `mavyex <path>` from another terminal: show the folder as a tab in this window.
     fn handle_external_open(&mut self, ctx: &Context, req: Option<PathBuf>) {
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -668,7 +668,7 @@ impl App {
         }
     }
 
-    /// Debounced reload of folders that changed outside of exyex: waits until
+    /// Debounced reload of folders that changed outside of mavyex: waits until
     /// the burst of events calms down (200 ms), but never longer than 1 s.
     fn apply_fs_events(&mut self, ctx: &Context) {
         let now = Instant::now();
@@ -855,7 +855,7 @@ impl App {
             }
         }
 
-        let title = format!("exyex — {}", self.tab().path.display());
+        let title = format!("mavyex — {}", self.tab().path.display());
         if title != self.last_title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.last_title = title;
@@ -2326,7 +2326,7 @@ impl App {
             size = vec2(w.w, w.h);
         }
         let mut builder = egui::ViewportBuilder::default()
-            .with_title("exyex — Operations")
+            .with_title("mavyex — Operations")
             .with_inner_size(size)
             .with_min_inner_size([340.0, 150.0])
             .with_icon(egui::IconData { rgba: crate::icon_draw::render_icon(64), width: 64, height: 64 })
@@ -2341,7 +2341,7 @@ impl App {
         let mut close = false;
         let mut dismiss: Vec<u64> = vec![];
         let jobs = &mut self.jobs;
-        ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("exyex-operations"), builder, |ui, class| {
+        ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("mavyex-operations"), builder, |ui, class| {
             if ui.ctx().input(|i| i.viewport().close_requested()) {
                 close = true;
                 return;

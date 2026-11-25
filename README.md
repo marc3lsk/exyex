@@ -1,4 +1,4 @@
-# exyex
+# mavyex
 
 Native (Rust + egui) dual-pane file manager for Windows — a keyboard-first alternative to Explorer and Total Commander.
 
@@ -21,7 +21,7 @@ Native (Rust + egui) dual-pane file manager for Windows — a keyboard-first alt
 | F7 / Shift+F4 | new folder / new file |
 | F8, Del / Shift+Del | delete to Recycle Bin / permanently |
 | F2, Shift+F6 | rename |
-| Ctrl+C / X / V | clipboard (inside exyex) |
+| Ctrl+C / X / V | clipboard (inside mavyex) |
 | Ctrl+T / W / Shift+T, Ctrl+Tab | new / close / reopen tab, next tab |
 | Ctrl+L, Alt+D | edit path |
 | F4 | edit the file under the cursor in the external editor (on a folder: edit path) – see *Editing files* |
@@ -78,7 +78,7 @@ view button to choose the columns (Type / Size / Modified). The choice is rememb
 
 ## SFTP (Pageant)
 Browse and transfer files on SSH servers; authentication uses the keys loaded in **Pageant** (no passwords or key files are
-handled by exyex). **Ctrl+Shift+K** (or palette → *Connect to SFTP server*) opens the path bar with `sftp://`; type
+handled by mavyex). **Ctrl+Shift+K** (or palette → *Connect to SFTP server*) opens the path bar with `sftp://`; type
 `sftp://user@host[:port]/path` (a bare `sftp://user@host` opens the home folder) and press Enter.
 
 - Remote folders behave like local ones: tabs, history, breadcrumbs, favorites (★), recents, filter/search by name,
@@ -93,7 +93,7 @@ handled by exyex). **Ctrl+Shift+K** (or palette → *Connect to SFTP server*) op
   progress in the operations window, mtime preserved). Remote → remote is not supported (copy through a local folder).
 - New folder / new file / rename / delete work on the server. Delete is always permanent (there is no recycle bin).
 - Enter on a remote file downloads a temporary copy and opens it (changes are **not** uploaded back).
-- The first connection to a host saves its key fingerprint in `%APPDATA%\exyex\known_hosts.json`; a changed key is refused.
+- The first connection to a host saves its key fingerprint in `%APPDATA%\mavyex\known_hosts.json`; a changed key is refused.
 - Not available remotely: content search (name search in subfolders works but is slow), thumbnails; remote tabs are not
   restored at startup.
 
@@ -109,7 +109,7 @@ handled by exyex). **Ctrl+Shift+K** (or palette → *Connect to SFTP server*) op
 - **Zip / jar as folders:** Enter on a `.zip` browses it (path bar, search and subfolder search work inside).
   Copy out (F5, drag, clipboard) extracts. Archives are **editable**: copy / move / paste files in, delete, rename,
   new folder / file and F4 all work. The first change extracts the archive into a working copy; when you leave the
-  archive (all tabs out of it) exyex asks **Update archive / Discard changes / Later**, and also before exiting.
+  archive (all tabs out of it) mavyex asks **Update archive / Discard changes / Later**, and also before exiting.
   Updating rewrites the zip (everything is re-compressed with deflate; dates are kept).
 - **Tabs:** drag a tab left/right inside its strip to reorder (the blue mark shows where it lands).
 - Slow or network folders load in the background (spinner in the footer); window position/size is remembered.
@@ -124,16 +124,16 @@ one per line: `rs,toml = code {file}`. Files inside a zip are edited in the arch
 (the status bar confirms each upload).
 
 ## Install / command line
-Run `exyex_<version>_x64_setup.exe` (or `exyex.exe --install`). It installs per user (no admin):
-copies to `%LOCALAPPDATA%\Programs\exyex`, adds that folder to your user PATH, adds a Start menu shortcut and
-an "Apps & features" entry. `exyex --uninstall` (or Apps & features) removes it again.
+Run `mavyex_<version>_x64_setup.exe` (or `mavyex.exe --install`). It installs per user (no admin):
+copies to `%LOCALAPPDATA%\Programs\mavyex`, adds that folder to your user PATH, adds a Start menu shortcut and
+an "Apps & features" entry. `mavyex --uninstall` (or Apps & features) removes it again.
 
 Then, in any **new** terminal:
 
-    exyex .            # opens the current folder as a new tab in the running exyex
-    exyex C:\some\dir  # same; starts exyex if it is not running yet
+    mavyex .            # opens the current folder as a new tab in the running mavyex
+    mavyex C:\some\dir  # same; starts mavyex if it is not running yet
 
-exyex is single-instance: a second `exyex <path>` hands the path to the running window and exits.
+mavyex is single-instance: a second `mavyex <path>` hands the path to the running window and exits.
 If that folder is already open in a tab, it just switches to it.
 
-State lives in `%APPDATA%\exyex\state.json`.
+State lives in `%APPDATA%\mavyex\state.json`.

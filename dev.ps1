@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-  Starts exyex in development mode.
+  Starts mavyex in development mode.
 .DESCRIPTION
   Default: debug build + run (fast compile, slower runtime).
   -Release : optimized build + run (use when judging real-world speed of big folders).
   -Watch   : rebuild and restart on every source change (needs cargo-watch, offered to be installed).
-  Extra arguments after -- are passed to exyex, e.g. a folder to open.
+  Extra arguments after -- are passed to mavyex, e.g. a folder to open.
 .EXAMPLE
   .\dev.ps1
   .\dev.ps1 -Watch
@@ -29,9 +29,9 @@ if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
     throw "'cargo' not found. Install Rust from https://rustup.rs (plus VS Build Tools, `"Desktop development with C++`")."
 }
 
-# a running instance locks target\...\exyex.exe and breaks the rebuild
-Get-Process exyex -ErrorAction SilentlyContinue | ForEach-Object {
-    Write-Warning "exyex is already running (PID $($_.Id)) - stopping it."
+# a running instance locks target\...\mavyex.exe and breaks the rebuild
+Get-Process mavyex -ErrorAction SilentlyContinue | ForEach-Object {
+    Write-Warning "mavyex is already running (PID $($_.Id)) - stopping it."
     Stop-Process -Id $_.Id -Force
 }
 

@@ -1,8 +1,8 @@
 <#
 .SYNOPSIS
-  Builds the optimized exyex.exe and collects it in .\release\ (portable .exe and .zip).
+  Builds the optimized mavyex.exe and collects it in .\release\ (portable .exe and .zip).
 .PARAMETER Bundle
-  exe (portable), setup (self-installing exe: adds exyex to PATH), zip or all (default).
+  exe (portable), setup (self-installing exe: adds mavyex to PATH), zip or all (default).
 .PARAMETER SkipChecks
   Skip `cargo check` and `cargo test` before building.
 .EXAMPLE
@@ -33,16 +33,16 @@ function Invoke-Step([string]$title, [scriptblock]$block) {
 $toml = Get-Content Cargo.toml -Raw
 $ver = if ($toml -match '(?m)^version\s*=\s*"([^"]+)"') { $Matches[1] } else { throw 'version not found in Cargo.toml' }
 if (Test-Path Cargo.lock) {
-    $lockVer = if ((Get-Content Cargo.lock -Raw) -match 'name = "exyex"\r?\nversion = "([^"]+)"') { $Matches[1] } else { $null }
+    $lockVer = if ((Get-Content Cargo.lock -Raw) -match 'name = "mavyex"\r?\nversion = "([^"]+)"') { $Matches[1] } else { $null }
     if ($lockVer -and $lockVer -ne $ver) {
         throw "Version mismatch: Cargo.toml=$ver, Cargo.lock=$lockVer. Run .\bump-version.ps1 -Version $ver"
     }
 }
-Write-Host "Packaging exyex $ver" -ForegroundColor Green
+Write-Host "Packaging mavyex $ver" -ForegroundColor Green
 
 # a running instance locks the exe
-Get-Process exyex -ErrorAction SilentlyContinue | ForEach-Object {
-    Write-Warning "exyex is running (PID $($_.Id)) - stopping it."
+Get-Process mavyex -ErrorAction SilentlyContinue | ForEach-Object {
+    Write-Warning "mavyex is running (PID $($_.Id)) - stopping it."
     Stop-Process -Id $_.Id -Force
 }
 
@@ -53,21 +53,21 @@ if (-not $SkipChecks) {
 Invoke-Step 'cargo build --release' { cargo build --release }
 
 # --- collect artifacts
-$built = Join-Path $PSScriptRoot 'target\release\exyex.exe'
+$built = Join-Path $PSScriptRoot 'target\release\mavyex.exe'
 if (-not (Test-Path $built)) { throw "Build output not found: $built" }
 $out = Join-Path $PSScriptRoot 'release'
 New-Item -ItemType Directory -Force $out | Out-Null
 
 $produced = @()
 if ($Bundle -in 'all', 'exe') {
-    $produced += Copy-Item $built (Join-Path $out "exyex_${ver}_x64.exe") -Force -PassThru
+    $produced += Copy-Item $built (Join-Path $out "mavyex_${ver}_x64.exe") -Force -PassThru
 }
 if ($Bundle -in 'all', 'setup') {
-    # Same binary under a *_setup name: exyex detects that and runs the install wizard.
-    $produced += Copy-Item $built (Join-Path $out "exyex_${ver}_x64_setup.exe") -Force -PassThru
+    # Same binary under a *_setup name: mavyex detects that and runs the install wizard.
+    $produced += Copy-Item $built (Join-Path $out "mavyex_${ver}_x64_setup.exe") -Force -PassThru
 }
 if ($Bundle -in 'all', 'zip') {
-    $zip = Join-Path $out "exyex_${ver}_x64.zip"
+    $zip = Join-Path $out "mavyex_${ver}_x64.zip"
     Remove-Item $zip -Force -ErrorAction SilentlyContinue
     $items = @($built); if (Test-Path README.md) { $items += (Resolve-Path README.md).Path }
     Compress-Archive -Path $items -DestinationPath $zip

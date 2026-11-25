@@ -1,5 +1,5 @@
 //! Generates icon.ico from the same drawing code the app uses at runtime and
-//! embeds it into exyex.exe (so Explorer / taskbar pins show it too).
+//! embeds it into mavyex.exe (so Explorer / taskbar pins show it too).
 
 include!("src/icon_draw.rs");
 
@@ -84,12 +84,12 @@ fn main() {
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
-    let path = PathBuf::from(env::var("OUT_DIR").unwrap()).join("exyex.ico");
+    let path = PathBuf::from(env::var("OUT_DIR").unwrap()).join("mavyex.ico");
     fs::write(&path, ico(&[16, 24, 32, 48, 64, 256])).unwrap();
     let mut res = winresource::WindowsResource::new();
     res.set_icon(path.to_str().unwrap());
-    res.set("ProductName", "exyex");
-    res.set("FileDescription", "exyex file manager");
+    res.set("ProductName", "mavyex");
+    res.set("FileDescription", "mavyex file manager");
     // Never fail the build just because the resource compiler is missing.
     if let Err(e) = res.compile() {
         println!("cargo:warning=could not embed exe icon: {e}");

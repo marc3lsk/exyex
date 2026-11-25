@@ -159,14 +159,14 @@ impl TextDiff {
     /// Shows the diff in its own OS window. Returns false when it should close.
     pub fn ui(&mut self, ctx: &Context) -> bool {
         self.poll();
-        let title = format!("exyex — Compare: {}  ↔  {}", self.title_l, self.title_r);
+        let title = format!("mavyex — Compare: {}  ↔  {}", self.title_l, self.title_r);
         let builder = egui::ViewportBuilder::default()
             .with_title(title)
             .with_inner_size([1100.0, 680.0])
             .with_min_inner_size([480.0, 240.0])
             .with_icon(egui::IconData { rgba: crate::icon_draw::render_icon(64), width: 64, height: 64 });
         let mut close = false;
-        ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("exyex-textdiff"), builder, |ui, class| {
+        ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("mavyex-textdiff"), builder, |ui, class| {
             if ui.ctx().input(|i| i.viewport().close_requested() || i.key_pressed(Key::Escape)) {
                 close = true;
                 return;

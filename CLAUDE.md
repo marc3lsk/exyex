@@ -1,4 +1,4 @@
-# exyex – notes for agents
+# mavyex – notes for agents
 
 Native Rust (egui/eframe 0.37, Rust 2024) dual-pane file manager for **Windows** – a "next-gen" mix of Explorer and
 Total Commander. No web UI. User-facing docs (keys, search, install) are in `README.md`; this file is what you need
@@ -7,7 +7,7 @@ to change the code safely. The user writes Slovak; answer in Slovak, keep code/c
 ## Commands
 - `cargo build` / `cargo test` (~28 tests: ops, search, deep, archive, editor, textdiff). `.\dev.ps1` (-Release, -Watch), `.\bump-version.ps1`,
   `.\release.ps1 -Bundle exe|setup|zip|all` (outputs to `release\`, git-ignored).
-- **Kill the running app before building** (`taskkill /F /IM exyex.exe`), otherwise the exe is locked.
+- **Kill the running app before building** (`taskkill /F /IM mavyex.exe`), otherwise the exe is locked.
 
 ## Source map (`src/`)
 | File | Role |
@@ -25,8 +25,8 @@ to change the code safely. The user writes Slovak; answer in Slovak, keep code/c
 | `deep.rs` | "Subfolders" search: background BFS walker streaming `DeepMsg::Batch` |
 | `actions.rs` | `Action` enum, `bindings()` key table, palette list, names |
 | `ops.rs` | copy/move/trash/delete as background jobs (mpsc + cancel flag, progress, conflict naming) |
-| `store.rs` | persisted state `%APPDATA%\exyex\state.json` (favorites, frecency visits, session, theme, search opts, exclude) |
-| `single.rs` | single instance: named mutex + pipe `\\.\pipe\exyex-<USER>`; `exyex <path>` opens a tab in the running app |
+| `store.rs` | persisted state `%APPDATA%\mavyex\state.json` (favorites, frecency visits, session, theme, search opts, exclude) |
+| `single.rs` | single instance: named mutex + pipe `\\.\pipe\mavyex-<USER>`; `mavyex <path>` opens a tab in the running app |
 | `install.rs` | per-user self-installer (HKCU Path, Apps & features, Start menu). **Never run on the user's machine / untested** |
 | `icons.rs`, `icon_draw.rs`, `build.rs` | shell icons per extension; generated app icon (also embedded in exe via build.rs) |
 
@@ -84,12 +84,12 @@ to change the code safely. The user writes Slovak; answer in Slovak, keep code/c
   with the Write tool and run `python -I script.py`, or use Edit. A hook runs rustfmt after edits.
 - egui 0.37: `TextEdit::show(ui).response` is a `WidgetAtomResponse` – use `(*out.response).clone()` for an owned
   `Response`. Use `use eframe::egui` in modules. `Id::new` is deprecated (warnings are expected, harmless).
-- Live testing: take window screenshots with PrintWindow of the exyex process only (never full-desktop – it can
-  capture the user's other windows). Back up and restore `%APPDATA%\exyex\state.json` around tests. If you add temporary
+- Live testing: take window screenshots with PrintWindow of the mavyex process only (never full-desktop – it can
+  capture the user's other windows). Back up and restore `%APPDATA%\mavyex\state.json` around tests. If you add temporary
   demo/env hooks, remove them afterwards (grep for `DEMO`).
 - Tested live so far: single-instance forwarding, fs watcher, operations window, search modes rendering. Only compiled
   (not exercised): installer, tab drag/drop, slow-click rename, context menus, Right-arrow path autocomplete,
   subfolder search UI, Alt+Enter.
 
 ## Ideas offered but not done
-See `ROADMAP.md`. Notably: "Open in exyex" Explorer context menu, bulk rename, workspaces.
+See `ROADMAP.md`. Notably: "Open in mavyex" Explorer context menu, bulk rename, workspaces.

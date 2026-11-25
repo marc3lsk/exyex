@@ -305,7 +305,7 @@ mod tests {
 
     #[test]
     fn svg_renders_to_image_and_keeps_source() {
-        let p = std::env::temp_dir().join(format!("exyex-test-{}.svg", std::process::id()));
+        let p = std::env::temp_dir().join(format!("mavyex-test-{}.svg", std::process::id()));
         std::fs::write(&p, r##"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><rect width="40" height="20" fill="#f00"/></svg>"##).unwrap();
         match load_svg(&p) {
             PvData::Svg { img, size, source } => {
