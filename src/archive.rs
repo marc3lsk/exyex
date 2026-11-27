@@ -1,30 +1,61 @@
-//! Zip support: an archive behaves like a folder. A path such as
+//! Archive support (zip/jar, tar, tar.gz/tgz, gz): an archive behaves like a folder. A path such as
 //! `C:\x\a.zip\docs\readme.txt` is "virtual": the part up to `a.zip` exists on
-//! disk, the rest lives inside the archive.
+//! disk, the rest lives inside the archive. A plain `.gz` holds one compressed file; it is shown as a
+//! folder containing that file (named after the archive without `.gz`).
 //!
-//! Browsing reads the zip directly. The first *write* (copy in, delete, rename, F4 edit ...) extracts the
-//! whole archive into a staging folder (an "edit session"); from then on listing / reading use that folder.
-//! When the user leaves the archive, the app asks whether to write the staging folder back (`save`).
+//! Browsing reads the archive directly (tar/gz have no central directory, so their listing is built
+//! by one pass over the stream and cached by mtime/size). The first *write* (copy in, delete, rename,
+//! F4 edit ...) extracts the whole archive into a staging folder (an "edit session"); from then on
+//! listing / reading use that folder. When the user leaves the archive, the app asks whether to write
+//! the staging folder back (`save`).
 
 use crate::model::Entry;
 use std::{
     collections::{BTreeMap, HashMap},
     fs::File,
-    io::{self, Read},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     sync::{
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::SystemTime,
 };
 use zip::ZipArchive;
 
-const EXTS: [&str; 2] = ["zip", "jar"];
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Kind {
+    Zip,
+    Tar,
+    TarGz,
+    Gz,
+}
 
-/// Extension says it is an archive we can browse.
+fn kind(p: &Path) -> Option<Kind> {
+    let n = p.file_name()?.to_string_lossy().to_lowercase();
+    if n.ends_with(".zip") || n.ends_with(".jar") {
+        Some(Kind::Zip)
+    } else if n.ends_with(".tar.gz") || n.ends_with(".tgz") {
+        Some(Kind::TarGz)
+    } else if n.ends_with(".tar") {
+        Some(Kind::Tar)
+    } else if n.ends_with(".gz") {
+        Some(Kind::Gz)
+    } else {
+        None
+    }
+}
+
+const GZ_ONE: &str = "A .gz file holds exactly one file – use .tar.gz (or .tgz) for folders and several files";
+
+/// Extension says it is an archive we can browse (and write).
 pub fn is_archive_name(p: &Path) -> bool {
-    p.extension().is_some_and(|e| EXTS.iter().any(|x| e.eq_ignore_ascii_case(x)))
+    kind(p).is_some()
+}
+
+/// The name says single-file gzip (`.gz`, but not `.tar.gz`).
+pub fn is_plain_gz(p: &Path) -> bool {
+    kind(p) == Some(Kind::Gz)
 }
 
 /// Splits a virtual path into (archive file, path inside, using `/`).
@@ -72,8 +103,145 @@ fn virtual_path(zip: &Path, inner: &str) -> PathBuf {
     p
 }
 
-fn norm(name: &str) -> String {
-    name.replace('\\', "/")
+/// Normalizes a stored entry name: `/` separators, no `./`, no leading or trailing `/`.
+/// Returns the name and whether it was marked as a folder (trailing `/`); `None` for empty names
+/// and names with `..` (never shown or written outside the target).
+fn clean(name: &str) -> Option<(String, bool)> {
+    let n = name.replace('\\', "/");
+    let is_dir = n.ends_with('/');
+    let parts: Vec<&str> = n.split('/').filter(|p| !p.is_empty() && *p != ".").collect();
+    if parts.is_empty() || parts.contains(&"..") {
+        return None;
+    }
+    Some((parts.join("/"), is_dir))
+}
+
+/// Name of the single file inside a `.gz`: the archive name without `.gz`.
+fn gz_name(arc: &Path) -> String {
+    let n = arc.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let cut = n.len().saturating_sub(3);
+    let stem = if n.is_char_boundary(cut) { &n[..cut] } else { "" };
+    if stem.is_empty() { "data".into() } else { stem.into() }
+}
+
+/// Uncompressed size from the gzip trailer (ISIZE, modulo 4 GiB).
+fn gz_size(p: &Path) -> Option<u64> {
+    use std::io::{Seek, SeekFrom};
+    let mut f = File::open(p).ok()?;
+    if f.metadata().ok()?.len() < 18 {
+        return None;
+    }
+    f.seek(SeekFrom::End(-4)).ok()?;
+    let mut b = [0u8; 4];
+    f.read_exact(&mut b).ok()?;
+    Some(u32::from_le_bytes(b) as u64)
+}
+
+struct Meta<'a> {
+    name: &'a str,
+    is_dir: bool,
+    size: u64,
+    modified: Option<SystemTime>,
+}
+
+type Visit<'a> = dyn FnMut(&Meta, &mut dyn Read) -> Result<bool, String> + 'a;
+
+/// Visits the entries of an archive in stored order (with a reader for the content);
+/// the callback returns `false` to stop.
+fn each(arc: &Path, f: &mut Visit) -> Result<(), String> {
+    let es = |e: io::Error| e.to_string();
+    match kind(arc).ok_or("not an archive")? {
+        Kind::Zip => {
+            let mut ar = open(arc).map_err(es)?;
+            for i in 0..ar.len() {
+                let mut z = ar.by_index(i).map_err(|e| e.to_string())?;
+                let Some((name, d)) = clean(z.name()) else { continue };
+                let m = Meta { name: &name, is_dir: d || z.is_dir(), size: z.size(), modified: to_systime(z.last_modified()) };
+                if !f(&m, &mut z)? {
+                    break;
+                }
+            }
+        }
+        Kind::Tar => tar_each(io::BufReader::new(File::open(arc).map_err(es)?), f)?,
+        Kind::TarGz => tar_each(flate2::read::MultiGzDecoder::new(io::BufReader::new(File::open(arc).map_err(es)?)), f)?,
+        Kind::Gz => {
+            let name = gz_name(arc);
+            let modified = std::fs::metadata(arc).and_then(|m| m.modified()).ok();
+            let mut r = flate2::read::MultiGzDecoder::new(io::BufReader::new(File::open(arc).map_err(es)?));
+            f(&Meta { name: &name, is_dir: false, size: gz_size(arc).unwrap_or(0), modified }, &mut r)?;
+        }
+    }
+    Ok(())
+}
+
+fn tar_each<R: Read>(r: R, f: &mut Visit) -> Result<(), String> {
+    let mut ar = tar::Archive::new(r);
+    for e in ar.entries().map_err(|e| e.to_string())? {
+        let mut e = e.map_err(|e| e.to_string())?;
+        let t = e.header().entry_type();
+        if !(t.is_file() || t.is_dir()) {
+            continue; // links, devices, sparse files ...
+        }
+        let raw = String::from_utf8_lossy(&e.path_bytes()).into_owned();
+        let Some((name, d)) = clean(&raw) else { continue };
+        let modified = e.header().mtime().ok().map(|s| SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(s));
+        let m = Meta { name: &name, is_dir: d || t.is_dir(), size: e.size(), modified };
+        if !f(&m, &mut e)? {
+            break;
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone)]
+struct Item {
+    name: String,
+    is_dir: bool,
+    size: u64,
+    modified: Option<SystemTime>,
+}
+
+type Stamp = (Option<SystemTime>, u64);
+
+/// Listings of archive files, keyed by path and invalidated by (mtime, size).
+static INDEX: std::sync::LazyLock<Mutex<HashMap<String, (Stamp, Arc<Vec<Item>>)>>> = std::sync::LazyLock::new(Default::default);
+
+fn index(arc: &Path) -> io::Result<Arc<Vec<Item>>> {
+    let md = std::fs::metadata(arc)?;
+    let stamp = (md.modified().ok(), md.len());
+    if let Some((s, v)) = INDEX.lock().ok().and_then(|m| m.get(&key(arc)).cloned()) {
+        if s == stamp {
+            return Ok(v);
+        }
+    }
+    let v = Arc::new(build_index(arc)?);
+    if let Ok(mut m) = INDEX.lock() {
+        if m.len() > 32 {
+            m.clear();
+        }
+        m.insert(key(arc), (stamp, v.clone()));
+    }
+    Ok(v)
+}
+
+fn build_index(arc: &Path) -> io::Result<Vec<Item>> {
+    let mut out = vec![];
+    if kind(arc) == Some(Kind::Zip) {
+        // the central directory is enough (also lists encrypted entries)
+        let mut ar = open(arc)?;
+        for i in 0..ar.len() {
+            let Ok(z) = ar.by_index_raw(i) else { continue };
+            let Some((name, d)) = clean(z.name()) else { continue };
+            out.push(Item { name, is_dir: d || z.is_dir(), size: z.size(), modified: to_systime(z.last_modified()) });
+        }
+        return Ok(out);
+    }
+    each(arc, &mut |m, _| {
+        out.push(Item { name: m.name.to_string(), is_dir: m.is_dir, size: m.size, modified: m.modified });
+        Ok(true)
+    })
+    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    Ok(out)
 }
 
 // ------------------------------------------------------------------ edit sessions
@@ -221,28 +389,7 @@ pub fn save(zip: &Path) -> Result<(), String> {
     walk(&dir, "", &mut items).map_err(|e| e.to_string())?;
     // jar convention: META-INF/ (with the manifest) first
     items.sort_by_key(|(n, _, _)| !n.starts_with("META-INF/"));
-    let tmp = zip.with_extension("mavyex-tmp");
-    let r = (|| -> Result<(), String> {
-        let mut w = zip::ZipWriter::new(File::create(&tmp).map_err(|e| e.to_string())?);
-        for (name, path, is_dir) in &items {
-            let mut o = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-            if let Some(t) = std::fs::metadata(path).ok().and_then(|m| m.modified().ok()).and_then(zip_time) {
-                o = o.last_modified_time(t);
-            }
-            if *is_dir {
-                w.add_directory(name.clone(), o).map_err(|e| e.to_string())?;
-            } else {
-                w.start_file(name.clone(), o).map_err(|e| e.to_string())?;
-                io::copy(&mut File::open(path).map_err(|e| format!("{name}: {e}"))?, &mut w).map_err(|e| e.to_string())?;
-            }
-        }
-        w.finish().map_err(|e| e.to_string())?;
-        std::fs::rename(&tmp, zip).map_err(|e| format!("could not replace the archive (is it open elsewhere?): {e}"))
-    })();
-    if r.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-        return r;
-    }
+    write_archive(zip, &items, &AtomicBool::new(false), &mut |_, _| {})?;
     discard(zip);
     Ok(())
 }
@@ -252,56 +399,131 @@ pub fn tree_total(srcs: &[PathBuf]) -> u64 {
     srcs.iter().map(|s| tree_bytes(s).max(1)).sum()
 }
 
-/// Compresses `srcs` (files / folders, each stored under its own name) into a new zip at `zip_path`.
+/// Compresses `srcs` (files / folders, each stored under its own name) into a new archive at
+/// `zip_path`; the format follows its extension (zip/jar, tar, tar.gz/tgz, gz = one file only).
 /// Written to a temp file first; removed again on error or cancel.
 pub fn create(srcs: &[PathBuf], zip_path: &Path, cancel: &AtomicBool, progress: &mut dyn FnMut(u64, &Path)) -> Result<(), String> {
-    let tmp = zip_path.with_extension("mavyex-tmp");
-    let r = (|| -> Result<(), String> {
-        let mut w = zip::ZipWriter::new(File::create(&tmp).map_err(|e| e.to_string())?);
-        for s in srcs {
-            let Some(name) = s.file_name() else { continue };
-            add_tree(&mut w, s, &name.to_string_lossy(), cancel, progress)?;
+    let mut items = vec![];
+    for s in srcs {
+        let Some(name) = s.file_name() else { continue };
+        let name = name.to_string_lossy().into_owned();
+        if std::fs::metadata(s).map_err(|e| format!("{}: {e}", s.display()))?.is_dir() {
+            items.push((format!("{name}/"), s.clone(), true));
+            walk(s, &format!("{name}/"), &mut items).map_err(|e| format!("{}: {e}", s.display()))?;
+        } else {
+            items.push((name, s.clone(), false));
         }
-        w.finish().map_err(|e| e.to_string())?;
-        // replaces an existing file (the caller has already asked the user)
-        std::fs::rename(&tmp, zip_path).map_err(|e| e.to_string())
+    }
+    write_archive(zip_path, &items, cancel, progress)
+}
+
+/// Reads a file, reporting progress and stopping on cancel.
+struct Pump<'a> {
+    f: File,
+    path: &'a Path,
+    cancel: &'a AtomicBool,
+    progress: &'a mut dyn FnMut(u64, &Path),
+}
+
+impl Read for Pump<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.cancel.load(Ordering::Relaxed) {
+            return Err(io::Error::other("Cancelled"));
+        }
+        let n = self.f.read(buf)?;
+        (self.progress)(n as u64, self.path);
+        Ok(n)
+    }
+}
+
+/// Writes `items` (name with `/` and trailing `/` for folders, source path, is folder) as a new
+/// archive at `out` (format by extension), via a temp file that replaces `out` at the end.
+fn write_archive(out: &Path, items: &[(String, PathBuf, bool)], cancel: &AtomicBool, progress: &mut dyn FnMut(u64, &Path)) -> Result<(), String> {
+    let tmp = out.with_extension("mavyex-tmp");
+    let r = (|| -> Result<(), String> {
+        let k = kind(out).unwrap_or(Kind::Zip);
+        if k == Kind::Gz && !matches!(items, [(_, _, false)]) {
+            return Err(GZ_ONE.into());
+        }
+        let f = File::create(&tmp).map_err(|e| e.to_string())?;
+        match k {
+            Kind::Zip => {
+                let mut w = zip::ZipWriter::new(f);
+                for (name, path, is_dir) in items {
+                    if cancel.load(Ordering::Relaxed) {
+                        return Err("Cancelled".into());
+                    }
+                    let md = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+                    let mut o = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated).large_file(md.len() > u32::MAX as u64);
+                    if let Some(t) = md.modified().ok().and_then(zip_time) {
+                        o = o.last_modified_time(t);
+                    }
+                    if *is_dir {
+                        w.add_directory(name.clone(), o).map_err(|e| e.to_string())?;
+                        progress(1, path);
+                    } else {
+                        w.start_file(name.clone(), o).map_err(|e| e.to_string())?;
+                        let f = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+                        io::copy(&mut Pump { f, path, cancel, progress: &mut *progress }, &mut w).map_err(|e| e.to_string())?;
+                        if md.len() == 0 {
+                            progress(1, path);
+                        }
+                    }
+                }
+                w.finish().map_err(|e| e.to_string())?;
+            }
+            Kind::Tar => {
+                let mut b = tar::Builder::new(io::BufWriter::new(f));
+                tar_items(&mut b, items, cancel, progress)?;
+                b.into_inner().map_err(|e| e.to_string())?.flush().map_err(|e| e.to_string())?;
+            }
+            Kind::TarGz => {
+                let mut b = tar::Builder::new(flate2::write::GzEncoder::new(io::BufWriter::new(f), flate2::Compression::default()));
+                tar_items(&mut b, items, cancel, progress)?;
+                b.into_inner().and_then(|g| g.finish()).and_then(|mut w| w.flush()).map_err(|e| e.to_string())?;
+            }
+            Kind::Gz => {
+                let (name, path, _) = &items[0];
+                let md = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+                let mut gb = flate2::GzBuilder::new().filename(name.as_str());
+                if let Some(s) = md.modified().ok().and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok()) {
+                    gb = gb.mtime(s.as_secs() as u32);
+                }
+                let mut w = gb.write(io::BufWriter::new(f), flate2::Compression::default());
+                let src = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+                io::copy(&mut Pump { f: src, path, cancel, progress: &mut *progress }, &mut w).map_err(|e| e.to_string())?;
+                if md.len() == 0 {
+                    progress(1, path);
+                }
+                w.finish().and_then(|mut w| w.flush()).map_err(|e| e.to_string())?;
+            }
+        }
+        Ok(())
     })();
+    // replaces an existing file (the caller has already asked the user)
+    let r = r.and_then(|()| std::fs::rename(&tmp, out).map_err(|e| format!("could not replace the archive (is it open elsewhere?): {e}")));
     if r.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
     r
 }
 
-fn add_tree(w: &mut zip::ZipWriter<File>, path: &Path, name: &str, cancel: &AtomicBool, progress: &mut dyn FnMut(u64, &Path)) -> Result<(), String> {
-    if cancel.load(Ordering::Relaxed) {
-        return Err("Cancelled".into());
-    }
-    let md = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let mut o = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated).large_file(md.len() > u32::MAX as u64);
-    if let Some(t) = md.modified().ok().and_then(zip_time) {
-        o = o.last_modified_time(t);
-    }
-    if md.is_dir() {
-        w.add_directory(format!("{name}/"), o).map_err(|e| e.to_string())?;
-        for e in std::fs::read_dir(path).map_err(|e| format!("{}: {e}", path.display()))?.flatten() {
-            add_tree(w, &e.path(), &format!("{name}/{}", e.file_name().to_string_lossy()), cancel, progress)?;
+fn tar_items<W: Write>(b: &mut tar::Builder<W>, items: &[(String, PathBuf, bool)], cancel: &AtomicBool, progress: &mut dyn FnMut(u64, &Path)) -> Result<(), String> {
+    for (name, path, is_dir) in items {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("Cancelled".into());
         }
-        progress(1, path);
-    } else {
-        w.start_file(name, o).map_err(|e| e.to_string())?;
-        let mut f = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let mut buf = vec![0u8; 1 << 20];
-        loop {
-            if cancel.load(Ordering::Relaxed) {
-                return Err("Cancelled".into());
-            }
-            let n = f.read(&mut buf).map_err(|e| format!("{}: {e}", path.display()))?;
-            if n == 0 {
-                break;
-            }
-            io::Write::write_all(w, &buf[..n]).map_err(|e| e.to_string())?;
-            progress(n as u64, path);
+        let name = name.trim_end_matches('/');
+        if *is_dir {
+            b.append_dir(name, path).map_err(|e| format!("{}: {e}", path.display()))?;
+            progress(1, path);
+            continue;
         }
+        let md = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut h = tar::Header::new_gnu();
+        h.set_metadata(&md);
+        let f = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        b.append_data(&mut h, name, Pump { f, path, cancel, progress: &mut *progress }).map_err(|e| e.to_string())?;
         if md.len() == 0 {
             progress(1, path);
         }
@@ -352,23 +574,21 @@ pub fn list(zip: &Path, inner: &str) -> io::Result<Vec<Entry>> {
     if let Some(dir) = active(zip) {
         return list_dir(zip, &dir, inner);
     }
-    let mut ar = open(zip)?;
+    let idx = index(zip)?;
     let prefix = if inner.is_empty() { String::new() } else { format!("{inner}/") };
     // name -> (is_dir, size, modified)
-    let mut map: BTreeMap<String, (bool, u64, Option<SystemTime>)> = BTreeMap::new();
-    for i in 0..ar.len() {
-        let Ok(f) = ar.by_index_raw(i) else { continue };
-        let name = norm(f.name());
-        let Some(rest) = name.strip_prefix(&prefix) else { continue };
+    let mut map: BTreeMap<&str, (bool, u64, Option<SystemTime>)> = BTreeMap::new();
+    for it in idx.iter() {
+        let Some(rest) = it.name.strip_prefix(&prefix) else { continue };
         if rest.is_empty() {
             continue;
         }
         match rest.split_once('/') {
             Some((dir, _)) => {
-                map.entry(dir.to_string()).or_insert((true, 0, None));
+                map.entry(dir).or_insert((true, 0, None));
             }
             None => {
-                map.insert(rest.to_string(), (f.is_dir(), f.size(), to_systime(f.last_modified())));
+                map.insert(rest, (it.is_dir, it.size, it.modified));
             }
         }
     }
@@ -377,7 +597,7 @@ pub fn list(zip: &Path, inner: &str) -> io::Result<Vec<Entry>> {
         .map(|(name, (is_dir, size, modified))| {
             let path = virtual_path(zip, &format!("{prefix}{name}"));
             let ext = if is_dir { String::new() } else { path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default() };
-            Entry { name, path, is_dir, size, modified, hidden: false, is_up: false, deep: false, snippet: String::new(), ext }
+            Entry { name: name.to_string(), path, is_dir, size, modified, hidden: false, is_up: false, deep: false, snippet: String::new(), ext }
         })
         .collect())
 }
@@ -387,18 +607,9 @@ pub fn size(zip: &Path, inner: &str) -> u64 {
     if let Some(dir) = active(zip) {
         return tree_bytes(&stage_path(&dir, inner));
     }
-    let Ok(mut ar) = open(zip) else { return 0 };
+    let Ok(idx) = index(zip) else { return 0 };
     let dir_prefix = format!("{inner}/");
-    let mut total = 0;
-    for i in 0..ar.len() {
-        if let Ok(f) = ar.by_index_raw(i) {
-            let n = norm(f.name());
-            if !f.is_dir() && (n == inner || n.starts_with(&dir_prefix)) {
-                total += f.size();
-            }
-        }
-    }
-    total
+    idx.iter().filter(|it| !it.is_dir && (inner.is_empty() || it.name == inner || it.name.starts_with(&dir_prefix))).map(|it| it.size).sum()
 }
 
 /// Extracts a file or a whole folder (`inner`) so that it ends up at `target`.
@@ -407,34 +618,28 @@ pub fn extract(zip: &Path, inner: &str, target: &Path, cancel: &AtomicBool, prog
     if let Some(dir) = active(zip) {
         return copy_staged(&stage_path(&dir, inner), target, cancel, progress);
     }
-    let mut ar = open(zip).map_err(|e| e.to_string())?;
     // an empty `inner` extracts everything
     let dir_prefix = if inner.is_empty() { String::new() } else { format!("{inner}/") };
     let mut found = false;
-    for i in 0..ar.len() {
+    each(zip, &mut |m, r| {
         if cancel.load(Ordering::Relaxed) {
             return Err("Cancelled".into());
         }
-        let mut f = ar.by_index(i).map_err(|e| e.to_string())?;
-        let name = norm(f.name());
-        let rel = if name == inner && !inner.is_empty() {
-            String::new()
-        } else if let Some(r) = name.strip_prefix(&dir_prefix) {
-            r.to_string()
+        let rel = if m.name == inner && !inner.is_empty() {
+            ""
+        } else if let Some(r) = m.name.strip_prefix(&dir_prefix) {
+            r
         } else {
-            continue;
+            return Ok(true);
         };
-        if rel.split('/').any(|p| p == "..") {
-            continue; // never write outside the target
-        }
         found = true;
         let mut out = target.to_path_buf();
         for part in rel.split('/').filter(|s| !s.is_empty()) {
             out.push(part);
         }
-        if f.is_dir() {
+        if m.is_dir {
             std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
-            continue;
+            return Ok(true);
         }
         if let Some(parent) = out.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -447,32 +652,45 @@ pub fn extract(zip: &Path, inner: &str, target: &Path, cancel: &AtomicBool, prog
                 let _ = std::fs::remove_file(&out);
                 return Err("Cancelled".into());
             }
-            let n = f.read(&mut buf).map_err(|e| e.to_string())?;
+            let n = r.read(&mut buf).map_err(|e| e.to_string())?;
             if n == 0 {
                 break;
             }
-            io::Write::write_all(&mut w, &buf[..n]).map_err(|e| e.to_string())?;
+            w.write_all(&buf[..n]).map_err(|e| e.to_string())?;
             progress(n as u64);
         }
-        if let Some(t) = to_systime(f.last_modified()) {
+        if let Some(t) = m.modified {
             let _ = w.set_modified(t); // keep the dates of the archived files
         }
-    }
+        Ok(!rel.is_empty()) // the one requested file is done: no need to read the rest of a tar stream
+    })?;
     if found { Ok(()) } else { Err(format!("{inner}: not found in archive")) }
 }
 
 /// Reads at most `max` bytes of a file inside an archive.
 pub fn read_head(zip: &Path, inner: &str, max: usize) -> io::Result<Vec<u8>> {
+    let mut buf = Vec::new();
     if let Some(dir) = active(zip) {
-        let mut buf = Vec::new();
         File::open(stage_path(&dir, inner))?.take(max as u64).read_to_end(&mut buf)?;
         return Ok(buf);
     }
-    let mut ar = open(zip)?;
-    let mut f = ar.by_name(inner).map_err(|e| io::Error::new(io::ErrorKind::NotFound, e.to_string()))?;
-    let mut buf = Vec::new();
-    f.by_ref().take(max as u64).read_to_end(&mut buf)?;
-    Ok(buf)
+    if kind(zip) == Some(Kind::Zip) {
+        if let Ok(mut f) = open(zip)?.by_name(inner) {
+            f.by_ref().take(max as u64).read_to_end(&mut buf)?;
+            return Ok(buf);
+        }
+    }
+    let mut found = false;
+    each(zip, &mut |m, r| {
+        if m.is_dir || m.name != inner {
+            return Ok(true);
+        }
+        found = true;
+        r.take(max as u64).read_to_end(&mut buf).map_err(|e| e.to_string())?;
+        Ok(false)
+    })
+    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    if found { Ok(buf) } else { Err(io::Error::new(io::ErrorKind::NotFound, format!("{inner}: not found in archive"))) }
 }
 
 /// Extracts one archive file to a temp folder (for "open") and returns its path.
@@ -546,6 +764,46 @@ mod tests {
         create(&srcs[1..], &zp, &AtomicBool::new(false), &mut |_, _| {}).unwrap(); // replaces
         assert_eq!(list(&zp, "").unwrap().len(), 1);
         assert!(!zp.with_extension("mavyex-tmp").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn tar_gz_and_gz_round_trip() {
+        let root = std::env::temp_dir().join(format!("mavyex-gz-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("dir/sub")).unwrap();
+        std::fs::write(root.join("dir/sub/x.txt"), "xx").unwrap();
+        std::fs::write(root.join("f.txt"), "hello").unwrap();
+        let srcs = vec![root.join("dir"), root.join("f.txt")];
+        for name in ["out.tar.gz", "out.tgz", "out.tar"] {
+            let tp = root.join(name);
+            create(&srcs, &tp, &AtomicBool::new(false), &mut |_, _| {}).unwrap();
+            assert!(split(&tp.join("dir")).is_some(), "{name}");
+            let top: Vec<_> = list(&tp, "").unwrap().into_iter().map(|e| (e.name, e.is_dir)).collect();
+            assert_eq!(top, vec![("dir".to_string(), true), ("f.txt".to_string(), false)], "{name}");
+            assert_eq!(list(&tp, "dir/sub").unwrap()[0].size, 2);
+            assert_eq!(size(&tp, "dir"), 2);
+            assert_eq!(read_head(&tp, "f.txt", 4).unwrap(), b"hell");
+            let out = root.join(format!("x-{name}"));
+            extract(&tp, "dir", &out, &AtomicBool::new(false), &mut |_| {}).unwrap();
+            assert_eq!(std::fs::read_to_string(out.join("sub/x.txt")).unwrap(), "xx");
+        }
+        // edit session on a tar.gz
+        let tp = root.join("out.tar.gz");
+        std::fs::write(real_for_write(&tp.join("new.txt")).unwrap(), "added").unwrap();
+        save(&tp).unwrap();
+        assert_eq!(read_head(&tp, "new.txt", 100).unwrap(), b"added");
+        assert_eq!(list(&tp, "").unwrap().len(), 3);
+        // plain gz: one file, named after the archive
+        let gp = root.join("f.txt.gz");
+        create(&srcs[1..], &gp, &AtomicBool::new(false), &mut |_, _| {}).unwrap();
+        let e = list(&gp, "").unwrap();
+        assert_eq!((e[0].name.as_str(), e[0].size, e.len()), ("f.txt", 5, 1));
+        assert_eq!(read_head(&gp, "f.txt", 100).unwrap(), b"hello");
+        extract(&gp, "f.txt", &root.join("plain.txt"), &AtomicBool::new(false), &mut |_| {}).unwrap();
+        assert_eq!(std::fs::read_to_string(root.join("plain.txt")).unwrap(), "hello");
+        assert!(create(&srcs, &root.join("bad.gz"), &AtomicBool::new(false), &mut |_, _| {}).is_err());
+        assert!(!root.join("bad.gz").exists() && !root.join("bad.mavyex-tmp").exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 

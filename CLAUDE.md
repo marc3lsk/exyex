@@ -16,7 +16,7 @@ to change the code safely. The user writes Slovak; answer in Slovak, keep code/c
 | `app.rs` (largest) | `App` state, all UI (`ui_pane`, dialogs, palette, jobs window), `Ev` event queue, `run(Action)`, themes |
 | `model.rs` | `Entry`, `Tab` (entries/view/cursor/selection/history/sort/filter), `rebuild_view`, path helpers |
 | `search.rs` | in-folder search: `SearchMode` (Smart/Fuzzy/Wildcard/Regex), `compile -> Matcher` (score/ranges), `glob_match` |
-| `archive.rs` | zip/jar as folders: virtual paths (zip file path + inner path) (`split`, `list`, `extract`); hooked into `model::read_dir` and `ops`. Editable through *edit sessions* (staging folder, see Architecture) |
+| `archive.rs` | zip/jar, tar, tar.gz/tgz, gz as folders (`Kind` by name; tar/gz listings via one stream pass, cached in `INDEX` by mtime/size; plain `.gz` = one file named after the archive): virtual paths (zip file path + inner path) (`split`, `list`, `extract`); hooked into `model::read_dir` and `ops`. Editable through *edit sessions* (staging folder, see Architecture) |
 | `editor.rs` | F4 external editor: command templates (`{file}` `{dir}` `{line}`), per-extension rules, `launch` (resolves `.cmd`/`.exe` on PATH) |
 | `textdiff.rs` | Ctrl+Shift+D side-by-side text diff in its own OS window (`similar` crate), own dark/light theme |
 | `sftp.rs` | SFTP via `russh` + `russh-sftp` (pure Rust, `ring`; blocking API over a private tokio runtime) + Pageant agent auth; virtual paths `sftp:\user@host[:port]\~\dir`; connection pool, TOFU host keys, list/transfer/remove |

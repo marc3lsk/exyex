@@ -2038,6 +2038,7 @@ impl App {
                     }
                     Dialog::Zip { paths, text, fresh, .. } => {
                         ui.label(if paths.len() == 1 { format!("Zip \"{}\" into:", display_name(&paths[0])) } else { format!("Zip {} items into:", paths.len()) });
+                        ui.weak("Format by extension: .zip, .tar.gz / .tgz, .tar, or .gz (single file)");
                         let n = stem_len(text);
                         text_field(ui, text, fresh, Some(n))
                     }
@@ -2225,10 +2226,14 @@ impl App {
                         self.dialog = Some(Dialog::Zip { paths, dir, text, fresh: false });
                         return self.say(format!("⚠ {e}"));
                     }
-                    if !name.to_lowercase().ends_with(".zip") {
+                    if !crate::archive::is_archive_name(Path::new(&name)) {
                         name.push_str(".zip");
                     }
                     let target = dir.join(&name);
+                    if crate::archive::is_plain_gz(&target) && !matches!(paths.as_slice(), [one] if one.is_file()) {
+                        self.dialog = Some(Dialog::Zip { paths, dir, text, fresh: false });
+                        return self.say("⚠ A .gz holds a single file – use .tar.gz (or .tgz) for folders and several files");
+                    }
                     if paths.iter().any(|p| target.starts_with(p)) {
                         return self.say("⚠ The archive can't be created inside a folder being zipped");
                     }

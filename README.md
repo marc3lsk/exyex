@@ -17,7 +17,7 @@ Native (Rust + egui) dual-pane file manager for Windows — a keyboard-first alt
 |---|---|
 | Tab | switch pane |
 | F5 / F6 | copy / move to other pane |
-| Alt+Shift+F5 | zip the selection into a new `.zip` in this folder |
+| Alt+Shift+F5 | pack the selection into a new archive in this folder (`.zip`, or `.tar.gz`/`.tgz`/`.tar`/`.gz` by the name you type) |
 | F7 / Shift+F4 | new folder / new file |
 | F8, Del / Shift+Del | delete to Recycle Bin / permanently |
 | F2, Shift+F6 | rename |
@@ -106,11 +106,12 @@ handled by mavyex). **Ctrl+Shift+K** (or palette → *Connect to SFTP server*) o
 - **Ctrl+Shift+D – text compare:** side-by-side diff of two text files in its own window: select two files in one pane, or put the cursor on a
   file in each pane. Changed lines are paired and the changed characters highlighted; **F7 / F8** jump to the previous / next
   difference, checkboxes ignore whitespace / case, Esc closes. Works on local, SFTP and zip-inner files (text only, up to 4 MB).
-- **Zip / jar as folders:** Enter on a `.zip` browses it (path bar, search and subfolder search work inside).
+- **Archives as folders (zip, jar, tar, tar.gz / tgz, gz):** Enter on an archive browses it (path bar, search and subfolder search work inside).
   Copy out (F5, drag, clipboard) extracts. Archives are **editable**: copy / move / paste files in, delete, rename,
   new folder / file and F4 all work. The first change extracts the archive into a working copy; when you leave the
   archive (all tabs out of it) mavyex asks **Update archive / Discard changes / Later**, and also before exiting.
-  Updating rewrites the zip (everything is re-compressed with deflate; dates are kept).
+  Updating rewrites the archive in its own format (re-compressed with deflate / gzip; dates are kept).
+  A plain `.gz` holds one file (shown under the archive name without `.gz`); it can't take more files or folders.
 - **Tabs:** drag a tab left/right inside its strip to reorder (the blue mark shows where it lands).
 - Slow or network folders load in the background (spinner in the footer); window position/size is remembered.
 - Terminals: Alt+Shift+P PowerShell, Alt+Shift+C cmd, Alt+Shift+E Explorer here, Ctrl+Shift+O Windows Terminal.
