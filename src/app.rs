@@ -1250,6 +1250,16 @@ impl App {
                 #[cfg(not(windows))]
                 let _ = open::that_detached(target.parent().unwrap_or(&target));
             }
+            Properties | FolderProperties => {
+                let paths = if a == FolderProperties { vec![] } else { self.tab().targets() };
+                let paths = if paths.is_empty() { vec![self.tab().path.clone()] } else { paths };
+                if paths.iter().any(|p| crate::sftp::is_remote(p) || crate::archive::split_inner(p).is_some()) {
+                    return self.say("Properties work on local files only");
+                }
+                if let Err(e) = crate::props::show(&paths) {
+                    self.say(format!("⚠ {e}"));
+                }
+            }
             ExplorerHere => {
                 let dir = self.tab().path.clone();
                 if let Err(e) = std::process::Command::new("explorer.exe").arg(&dir).spawn() {
@@ -2731,6 +2741,7 @@ Search inside the files, in all subfolders.\nShows the first matching line. Bina
                     ("Copy folder path", Action::CopyFolderPath, true),
                     ("Open terminal here", Action::Terminal, true),
                     ("Open folder in Windows Explorer", Action::ExplorerHere, true),
+                    ("Properties", Action::FolderProperties, true),
                     ("Show hidden files", Action::ToggleHidden, true),
                     ("Sort by name", Action::SortName, true),
                     ("Sort by date", Action::SortDate, true),
@@ -3172,6 +3183,7 @@ fn item_interact(ui: &mut Ui, resp: &egui::Response, pi: usize, vi: usize, e: &E
             ("Open containing folder  (Alt+Enter)", Action::ShowInFolder),
             ("Show in Windows Explorer", Action::Reveal),
             ("Delete", Action::Delete),
+            ("Properties  (Alt+Shift+Enter)", Action::Properties),
         ] {
             if ui.button(label).clicked() {
                 evs.push(Ev::Run(a));

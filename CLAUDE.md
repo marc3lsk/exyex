@@ -22,6 +22,7 @@ to change the code safely. The user writes Slovak; answer in Slovak, keep code/c
 | `sftp.rs` | SFTP via `russh` + `russh-sftp` (pure Rust, `ring`; blocking API over a private tokio runtime) + Pageant agent auth; virtual paths `sftp:\user@host[:port]\~\dir`; connection pool, TOFU host keys, list/transfer/remove |
 | `thumbs.rs` | async image thumbnails for the grid view (texture cache) |
 | `preview.rs` | Quick Look panel (F3): background loader + UI |
+| `props.rs` | Windows Properties dialog (`SHObjectProperties` for one item, `SHMultiFileProperties` for several); local paths only |
 | `deep.rs` | "Subfolders" search: background BFS walker streaming `DeepMsg::Batch` |
 | `actions.rs` | `Action` enum, `bindings()` key table, palette list, names |
 | `ops.rs` | copy/move/trash/delete as background jobs (mpsc + cancel flag, progress, conflict naming) |

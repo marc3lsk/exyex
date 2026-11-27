@@ -12,6 +12,7 @@ mod install;
 mod model;
 mod ops;
 mod preview;
+mod props;
 mod search;
 mod sftp;
 mod single;

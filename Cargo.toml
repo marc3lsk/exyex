@@ -19,7 +19,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 trash = "5.4.0"
-windows = { version = "0.62.2", features = ["Win32_UI_Shell", "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Pipes", "Win32_System_Threading", "Win32_System_IO", "Win32_Security"] }
+windows = { version = "0.62.2", features = ["Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Pipes", "Win32_System_Threading", "Win32_System_IO", "Win32_Security"] }
 winreg = "0.56.0"
 similar = "2"
 flate2 = "1"

@@ -21,6 +21,7 @@ Native (Rust + egui) dual-pane file manager for Windows — a keyboard-first alt
 | F7 / Shift+F4 | new folder / new file |
 | F8, Del / Shift+Del | delete to Recycle Bin / permanently |
 | F2, Shift+F6 | rename |
+| Alt+Shift+Enter | Windows Properties dialog of the selection (also in the right-click menus) |
 | Ctrl+C / X / V | clipboard (inside mavyex) |
 | Ctrl+T / W / Shift+T, Ctrl+Tab | new / close / reopen tab, next tab |
 | Ctrl+L, Alt+D | edit path |
