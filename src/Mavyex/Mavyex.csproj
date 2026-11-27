@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>Mavyex</RootNamespace>
+    <!-- exe name stays mavyex.exe: installer, PATH, single instance rely on it -->
+    <AssemblyName>mavyex</AssemblyName>
+    <Version>0.2.0</Version>
+    <Product>mavyex</Product>
+    <Description>mavyex file manager</Description>
+    <ApplicationIcon>Assets\mavyex.ico</ApplicationIcon>
+    <StartupObject>Mavyex.Program</StartupObject>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <!-- WPF + InvariantGlobalization crashes (TextBox caret needs the input language culture): never enable it -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Resource Include="Assets\mavyex.ico" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- SFTP: SSH.NET + Pageant agent authentication -->
+    <PackageReference Include="SSH.NET" Version="2026.0.1" />
+    <PackageReference Include="SshNet.Agent" Version="2026.0.0" />
+    <!-- text compare -->
+    <PackageReference Include="DiffPlex" Version="1.9.0" />
+    <!-- SVG thumbnails / Quick Look -->
+    <PackageReference Include="SharpVectors.Wpf" Version="1.8.6" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Mavyex.Tests" />
+  </ItemGroup>
+
+</Project>

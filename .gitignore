@@ -1,3 +1,7 @@
 /target
 /release
 *.log
+bin/
+obj/
+/.vs
+*.user
