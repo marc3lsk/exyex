@@ -108,6 +108,16 @@ public sealed class PaneView : Border
             e.Handled = true;
         };
         tabRow.Children.Add(tabScroll);
+        // double-click on the empty strip next to the tabs opens a new tab (the background makes it hit-testable)
+        tabScroll.Background = Brushes.Transparent;
+        tabScroll.PreviewMouseLeftButtonDown += (_, e) => // Preview: ScrollViewer marks the bubbling event handled
+        {
+            if (e.ClickCount != 2) return;
+            for (var d = e.OriginalSource as DependencyObject; d != null && d != tabScroll; d = VisualTreeHelper.GetParent(d))
+                if (d is TabPill) return;
+            e.Handled = true;
+            app.NewTabIn(Pi);
+        };
         plusBtn.Click += () => app.NewTabIn(Pi);
         allBtn.Click += () => ShowAllTabsMenu(allBtn);
         tabStrip.AllowDrop = true;
