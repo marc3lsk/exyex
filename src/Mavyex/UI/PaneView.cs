@@ -984,7 +984,12 @@ public sealed class PaneView : Border
         var tab = Tab;
         var parts = new List<string>();
         if (tab.LoadingTo is { } to)
-            parts.Add($"◌ Loading {VPath.DisplayName(to)} … {(DateTime.Now - tab.LoadingSince!.Value).TotalSeconds:0}s");
+        {
+            var secs = (DateTime.Now - tab.LoadingSince!.Value).TotalSeconds;
+            parts.Add(Sftp.ConnectingTo(to) is { } c
+                ? $"{MainWindow.Spinner()} Connecting to {c.Label} – {c.Phase} … {secs:0}s"
+                : $"{MainWindow.Spinner()} Loading {Sftp.Pretty(to) ?? VPath.DisplayName(to)} … {secs:0}s");
+        }
         parts.Add(tab.SelectionSummary());
         if (tab.Current is { IsDir: false } cur) parts.Add("· " + cur.Name);
         footer.Text = string.Join("  ", parts);
