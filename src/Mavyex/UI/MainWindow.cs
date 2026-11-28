@@ -312,6 +312,9 @@ public sealed partial class MainWindow : Window
 
     private string statusKey = "";
 
+    /// <summary>Spinner frame for busy indicators (advances with the 120 ms tick).</summary>
+    public static string Spinner() => "◐◓◑◒"[(int)(Environment.TickCount64 / 120 % 4)].ToString();
+
     private void RenderStatus()
     {
         var running = jobs.Where(j => j.State == JobState.Running).ToList();
@@ -335,6 +338,21 @@ public sealed partial class MainWindow : Window
                 var details = new Chip("Details", tip: "Show / hide the operations window") { Margin = new Thickness(6, 0, 0, 0) };
                 details.Click += () => { jobsOpen = !jobsOpen; Render(); };
                 statusLeft.Children.Add(details);
+            }
+        }
+        else if (Sftp.ConnectingNow() is { Count: > 0 } conns)
+        {
+            // SFTP connect in progress: spinner + server + phase + elapsed seconds
+            var c = conns.OrderBy(x => x.Since).First();
+            var secs = (DateTime.Now - c.Since).TotalSeconds;
+            var text = $"{Spinner()}  Connecting to {c.Label} – {c.Phase} … {secs:0}s" + (conns.Count > 1 ? $"  (+{conns.Count - 1} more)" : "");
+            key = "C" + text;
+            if (key != statusKey)
+            {
+                statusLeft.Children.Clear();
+                var t = new TextBlock { Text = text, VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis };
+                t.SetResourceReference(TextBlock.ForegroundProperty, "Accent");
+                statusLeft.Children.Add(t);
             }
         }
         else
@@ -465,6 +483,7 @@ public sealed partial class MainWindow : Window
             }
         }
         changed |= PollDeepCore();
+        if (Sftp.ConnectingNow().Count > 0) changed = true; // animate the connect indicator
         // folders we could not watch (network shares, archives): slow mtime poll
         foreach (var p in Panes)
         {
@@ -567,7 +586,7 @@ public sealed partial class MainWindow : Window
             if (queue.Count > 0)
             {
                 dialog = new ConflictDialog { Kind = kind, Srcs = srcs, Dest = dest, Queue = queue, Existing = existing };
-                ShowDialog();
+                OpenDialog();
                 return;
             }
         }
@@ -751,7 +770,7 @@ public sealed partial class MainWindow : Window
         if (Archive.Sessions().FirstOrDefault(Archive.IsDirty) is { } zip)
         {
             dialog = new ArchiveUpdateDialog { Zip = zip, Quit = true };
-            ShowDialog();
+            OpenDialog();
             return;
         }
         quit = true;

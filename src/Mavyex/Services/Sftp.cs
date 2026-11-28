@@ -312,21 +312,58 @@ public static class Sftp
         }
     }
 
+    // ------------------------------------------------------------------ connect progress (shown by the UI)
+
+    private static readonly Dictionary<string, (string Label, string Phase, DateTime Since)> _connecting = new();
+
+    /// <summary>Connections being opened right now: (label, phase, started). Thread-safe snapshot for the UI.</summary>
+    public static List<(string Label, string Phase, DateTime Since)> ConnectingNow()
+    {
+        lock (_connecting) return _connecting.Values.ToList();
+    }
+
+    /// <summary>The phase of a connection being opened to the server of path p, or null.</summary>
+    public static (string Label, string Phase, DateTime Since)? ConnectingTo(string p)
+    {
+        if (Parse(p) is not { } l) return null;
+        lock (_connecting) return _connecting.TryGetValue(l.Key, out var v) ? v : null;
+    }
+
+    private static void Phase(Loc l, string? phase)
+    {
+        lock (_connecting)
+        {
+            if (phase == null) _connecting.Remove(l.Key);
+            else _connecting[l.Key] = (LabelOf(l), phase, _connecting.TryGetValue(l.Key, out var old) ? old.Since : DateTime.Now);
+        }
+    }
+
     private static Conn Connect(Loc l)
     {
-        // SSH.NET needs the auth methods before connecting, so Pageant is asked first (Rust asked after the handshake).
-        var keys = AgentKeys();
-        var sftp = new SftpClient(Info(l, keys))
+        try
         {
-            KeepAliveInterval = TimeSpan.FromSeconds(30),
-            OperationTimeout = TimeSpan.FromSeconds(60),
-        };
-        Open(sftp, l, keys.Length);
-        string home;
-        try { home = sftp.WorkingDirectory; } // realpath(".") done by SSH.NET on connect
-        catch { home = "/"; }
-        if (string.IsNullOrEmpty(home)) home = "/";
-        return new Conn(l with { Rest = [] }, keys, sftp, home);
+            // SSH.NET needs the auth methods before connecting, so Pageant is asked first (Rust asked after the handshake).
+            Phase(l, "asking Pageant for keys");
+            var keys = AgentKeys();
+            var sftp = new SftpClient(Info(l, keys))
+            {
+                KeepAliveInterval = TimeSpan.FromSeconds(30),
+                OperationTimeout = TimeSpan.FromSeconds(60),
+            };
+            Phase(l, $"connecting to {l.Host}:{l.Port}");
+            sftp.HostKeyReceived += (_, _) => Phase(l, "authenticating with Pageant");
+            Open(sftp, l, keys.Length);
+            Phase(l, "opening SFTP session");
+            string home;
+            try { home = sftp.WorkingDirectory; } // realpath(".") done by SSH.NET on connect
+            catch { home = "/"; }
+            if (string.IsNullOrEmpty(home)) home = "/";
+            return new Conn(l with { Rest = [] }, keys, sftp, home);
+        }
+        finally
+        {
+            Phase(l, null);
+        }
     }
 
     private static Conn Acquire(Loc l)

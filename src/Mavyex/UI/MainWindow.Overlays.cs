@@ -259,7 +259,7 @@ public sealed partial class MainWindow
     private Button? okButton;
     private TextBox? firstBox;
 
-    private void ShowDialog()
+    private void OpenDialog()
     {
         if (dialog is not { } dlg) return;
         overlay.Children.Clear();
@@ -589,7 +589,7 @@ public sealed partial class MainWindow
         else
         {
             cf.All = false;
-            ShowDialog();
+            OpenDialog();
         }
         Render();
     }
@@ -631,7 +631,7 @@ public sealed partial class MainWindow
         if (File.Exists(target) || Directory.Exists(target))
         {
             dialog = new ZipExistsDialog { Paths = z.Paths, Dir = z.Dir, Name = name };
-            ShowDialog();
+            OpenDialog();
         }
         else
         {

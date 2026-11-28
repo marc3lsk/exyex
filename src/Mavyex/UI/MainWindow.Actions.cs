@@ -109,7 +109,7 @@ public sealed partial class MainWindow
                 if (Sftp.ConnKey(p) is { } key)
                 {
                     dialog = new SftpAliasDialog { Key = key, Text = Store.Aliases.GetValueOrDefault(key, "") };
-                    ShowDialog();
+                    OpenDialog();
                 }
                 else Say("Open an SFTP folder (or select a connection in sftp:) first");
                 break;
@@ -121,7 +121,7 @@ public sealed partial class MainWindow
                 else
                 {
                     dialog = new ChownDialog { Paths = paths };
-                    ShowDialog();
+                    OpenDialog();
                 }
                 break;
             }
@@ -213,12 +213,12 @@ public sealed partial class MainWindow
                 if (paths.Count > 0)
                 {
                     dialog = new TransferDialog { Kind = a == Act.Copy ? OpKind.Copy : OpKind.Move, Paths = paths, Dest = Panes[Other].Tab.Path };
-                    ShowDialog();
+                    OpenDialog();
                 }
                 break;
             }
-            case Act.NewFolder: dialog = new NewFolderDialog(); ShowDialog(); break;
-            case Act.NewFile: dialog = new NewFileDialog(); ShowDialog(); break;
+            case Act.NewFolder: dialog = new NewFolderDialog(); OpenDialog(); break;
+            case Act.NewFile: dialog = new NewFileDialog(); OpenDialog(); break;
             case Act.Zip:
             {
                 var paths = tab.Targets();
@@ -231,7 +231,7 @@ public sealed partial class MainWindow
                 }
                 var baseName = paths.Count == 1 ? (VPath.Stem(paths[0]) is { Length: > 0 } s ? s : VPath.FileName(paths[0])) : VPath.FileName(dir);
                 dialog = new ZipDialog { Paths = paths, Dir = dir, Text = (baseName ?? "archive") + ".zip" };
-                ShowDialog();
+                OpenDialog();
                 break;
             }
             case Act.Delete:
@@ -242,7 +242,7 @@ public sealed partial class MainWindow
                 {
                     bool permanent = a == Act.DeletePermanent || paths.Any(p => Sftp.IsRemote(p) || Archive.SplitInner(p) != null);
                     dialog = new DeleteDialog { Paths = paths, Permanent = permanent };
-                    ShowDialog();
+                    OpenDialog();
                 }
                 break;
             }
@@ -264,7 +264,7 @@ public sealed partial class MainWindow
             }
             case Act.EditorSettings:
                 dialog = new EditorDialog { Cmd = Store.Editor, Rules = Store.EditorRules };
-                ShowDialog();
+                OpenDialog();
                 break;
             case Act.ClipCopy:
             case Act.ClipCut:
@@ -688,7 +688,7 @@ public sealed partial class MainWindow
             if (Archive.IsDirty(zip))
             {
                 dialog = new ArchiveUpdateDialog { Zip = zip };
-                ShowDialog();
+                OpenDialog();
                 return true;
             }
             Archive.Discard(zip); // nothing changed: drop the working copy
