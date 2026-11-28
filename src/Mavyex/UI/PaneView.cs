@@ -663,6 +663,9 @@ public sealed class PaneView : Border
             emptyText.SetResourceReference(TextBlock.ForegroundProperty, "WeakFg");
         }
         else emptyText.Text = "";
+        // below the ".." row (the error replaces the list, so it starts at the top)
+        int upRows = tab.Error != null ? 0 : tab.View.Count(i => tab.Entries[i].IsUp);
+        emptyText.Margin = new Thickness(6, 4 + (view == ViewMode.Grid ?(upRows > 0 ? GridRow.CellH : 0) : upRows * Tab.RowH), 0, 0);
         // the error replaces the list (like Rust)
         list.Visibility = tab.Error != null ? Visibility.Hidden : Visibility.Visible;
         bool grid = view == ViewMode.Grid;
