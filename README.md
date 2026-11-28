@@ -1,8 +1,10 @@
 # mavyex
 
-Native (Rust + egui) dual-pane file manager for Windows — a keyboard-first alternative to Explorer and Total Commander.
+Native (C# / WPF on .NET 10) dual-pane file manager for Windows — a keyboard-first alternative to Explorer and Total Commander.
 
-    cargo run --release
+    .\dev.ps1            # build + run (needs the .NET 10 SDK)
+
+Versions up to 0.1.x were written in Rust (egui); the .NET port keeps the same features, keys and `state.json`.
 
 ## Features
 - Two panes, multiple tabs per pane, back/forward history per tab, session restore
@@ -39,7 +41,7 @@ Type to filter the current folder instantly. Mode chips next to the box (or Alt+
 | Smart | words are combined: plain text = contains, `*.rs` / `?` = wildcard, `!draft` = exclude, `~rdme` = fuzzy, `re:^img_\d+` = regex |
 | Fuzzy | letters must appear in order (`rdme` finds `README.md`); best matches first |
 | Wildcard | `*` and `?`, whole name; plain text = contains |
-| Regex | Rust regex, matched anywhere in the name; an invalid pattern turns the box red and keeps the list |
+| Regex | .NET regular expression, matched anywhere in the name; an invalid pattern turns the box red and keeps the list |
 
 Up/Down/PageUp/PageDown move through the results while the box has focus, Enter opens the selected result,
 Tab hands the keyboard to the list, Esc closes the search.
@@ -139,3 +141,16 @@ mavyex is single-instance: a second `mavyex <path>` hands the path to the runnin
 If that folder is already open in a tab, it just switches to it.
 
 State lives in `%APPDATA%\mavyex\state.json`.
+
+## Build
+Requires the .NET 10 SDK (the published exe needs the .NET 10 Desktop Runtime unless built with `-SelfContained`).
+
+```powershell
+.\dev.ps1                         # build + run (stops a running mavyex first)
+.\dev.ps1 -DataDir $env:TEMP\mv   # test instance with its own state, next to the installed one
+.\dev.ps1 -Watch                  # rebuild + restart on changes
+.elease.ps1                     # tests + single-file exe, setup exe and zip into .elease.elease.ps1 -SelfContained      # same, with the .NET runtime inside
+.ump-version.ps1                # 0.2.0 -> 0.2.1
+dotnet test mavyex.slnx
+```
+

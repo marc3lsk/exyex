@@ -1,27 +1,28 @@
 <#
 .SYNOPSIS
-  Builds the optimized mavyex.exe and collects it in .\release\ (portable .exe and .zip).
+  Publishes mavyex.exe (single file) and collects it in .\release\ (portable .exe, setup .exe and .zip).
 .PARAMETER Bundle
-  exe (portable), setup (self-installing exe: adds mavyex to PATH), zip or all (default).
-.PARAMETER SkipChecks
-  Skip `cargo check` and `cargo test` before building.
+  exe (portable), setup (self-installing exe: per-user install, adds mavyex to PATH, Start menu), zip or all (default).
+.PARAMETER SelfContained
+  Bundle the .NET runtime into the exe (~70 MB, runs without .NET installed). Default: framework-dependent
+  (small exe, needs the .NET 10 Desktop Runtime).
+.PARAMETER SkipTests
+  Skip `dotnet test` before publishing.
 .EXAMPLE
   .\release.ps1
-  .\release.ps1 -Bundle zip
+  .\release.ps1 -Bundle setup -SelfContained
 #>
 [CmdletBinding()]
 param(
     [ValidateSet('all', 'exe', 'setup', 'zip')][string]$Bundle = 'all',
-    [switch]$SkipChecks
+    [switch]$SelfContained,
+    [switch]$SkipTests
 )
 
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
 
-$cargoBin = Join-Path $env:USERPROFILE '.cargo\bin'
-if ((Test-Path $cargoBin) -and ($env:Path -notlike "*$cargoBin*")) { $env:Path += ";$cargoBin" }
-
-if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { throw "'cargo' not found. Install Rust from https://rustup.rs" }
+if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) { throw "'dotnet' not found. Install the .NET 10 SDK." }
 
 function Invoke-Step([string]$title, [scriptblock]$block) {
     Write-Host "> $title" -ForegroundColor Cyan
@@ -29,35 +30,25 @@ function Invoke-Step([string]$title, [scriptblock]$block) {
     if ($LASTEXITCODE -ne 0) { throw "Step failed: $title (exit code $LASTEXITCODE)" }
 }
 
-# --- Cargo.toml and Cargo.lock must agree
-$toml = Get-Content Cargo.toml -Raw
-$ver = if ($toml -match '(?m)^version\s*=\s*"([^"]+)"') { $Matches[1] } else { throw 'version not found in Cargo.toml' }
-if (Test-Path Cargo.lock) {
-    $lockVer = if ((Get-Content Cargo.lock -Raw) -match 'name = "mavyex"\r?\nversion = "([^"]+)"') { $Matches[1] } else { $null }
-    if ($lockVer -and $lockVer -ne $ver) {
-        throw "Version mismatch: Cargo.toml=$ver, Cargo.lock=$lockVer. Run .\bump-version.ps1 -Version $ver"
-    }
-}
-Write-Host "Packaging mavyex $ver" -ForegroundColor Green
+$project = 'src\Mavyex\Mavyex.csproj'
+$ver = if ((Get-Content $project -Raw) -match '<Version>([^<]+)</Version>') { $Matches[1] } else { throw "Version not found in $project" }
+Write-Host "Packaging mavyex $ver$(if ($SelfContained) { ' (self-contained)' })" -ForegroundColor Green
 
-# a running instance locks the exe
-Get-Process mavyex -ErrorAction SilentlyContinue | ForEach-Object {
-    Write-Warning "mavyex is running (PID $($_.Id)) - stopping it."
-    Stop-Process -Id $_.Id -Force
+if (-not $SkipTests) {
+    Invoke-Step 'dotnet test' { dotnet test mavyex.slnx -c Release -nologo -v q }
 }
 
-if (-not $SkipChecks) {
-    Invoke-Step 'cargo check'  { cargo check --release }
-    Invoke-Step 'cargo test'   { cargo test --release }
+$pub = Join-Path $PSScriptRoot 'release\publish'
+Remove-Item $pub -Recurse -Force -ErrorAction SilentlyContinue
+$sc = if ($SelfContained) { 'true' } else { 'false' }
+Invoke-Step 'dotnet publish' {
+    dotnet publish $project -c Release -r win-x64 --self-contained $sc -o $pub -nologo -v q `
+        -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=$sc -p:DebugType=none
 }
-Invoke-Step 'cargo build --release' { cargo build --release }
 
-# --- collect artifacts
-$built = Join-Path $PSScriptRoot 'target\release\mavyex.exe'
-if (-not (Test-Path $built)) { throw "Build output not found: $built" }
+$built = Join-Path $pub 'mavyex.exe'
+if (-not (Test-Path $built)) { throw "Publish output not found: $built" }
 $out = Join-Path $PSScriptRoot 'release'
-New-Item -ItemType Directory -Force $out | Out-Null
-
 $produced = @()
 if ($Bundle -in 'all', 'exe') {
     $produced += Copy-Item $built (Join-Path $out "mavyex_${ver}_x64.exe") -Force -PassThru

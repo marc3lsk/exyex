@@ -1,9 +1,7 @@
 <#
 .SYNOPSIS
-  Bumps the app version in every place it is stored.
-.DESCRIPTION
-  Updates Cargo.toml and the mavyex entry of Cargo.lock so they never drift apart
-  (the version is baked into the exe via CARGO_PKG_VERSION and used by release.ps1).
+  Bumps the app version (the <Version> in src\Mavyex\Mavyex.csproj – the only place it is stored;
+  it ends up in the exe, the installer's "Apps & features" entry and the release file names).
 .PARAMETER Part
   patch (default), minor or major.
 .PARAMETER Version
@@ -11,8 +9,8 @@
 .PARAMETER DryRun
   Show what would change without writing anything.
 .EXAMPLE
-  .\bump-version.ps1            # 0.1.0 -> 0.1.1
-  .\bump-version.ps1 minor      # 0.1.1 -> 0.2.0
+  .\bump-version.ps1            # 0.2.0 -> 0.2.1
+  .\bump-version.ps1 minor      # 0.2.1 -> 0.3.0
   .\bump-version.ps1 -Version 1.0.0
 #>
 [CmdletBinding()]
@@ -25,17 +23,10 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
 
+$project = Join-Path $PSScriptRoot 'src\Mavyex\Mavyex.csproj'
 $semver = '^(\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z.-]+)?$'
-$utf8 = New-Object System.Text.UTF8Encoding($false)
-
-function Read-Text($path) { [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot $path)) }
-function Write-Text($path, $text) {
-    if (-not $DryRun) { [System.IO.File]::WriteAllText((Join-Path $PSScriptRoot $path), $text, $utf8) }
-}
-
-# current version = the [package] version in Cargo.toml (source of truth)
-$toml = Read-Text 'Cargo.toml'
-if ($toml -notmatch '(?m)^version\s*=\s*"([^"]+)"') { throw 'version not found in Cargo.toml' }
+$text = [System.IO.File]::ReadAllText($project)
+if ($text -notmatch '<Version>([^<]+)</Version>') { throw "<Version> not found in $project" }
 $current = $Matches[1]
 
 if ($Version) {
@@ -54,20 +45,9 @@ if ($Version) {
 if ($new -eq $current) { Write-Host "Already at $current - nothing to do."; return }
 
 Write-Host "Version: $current -> $new$(if ($DryRun) { '  (dry run)' })" -ForegroundColor Cyan
-
-# Cargo.toml: only the FIRST top-level `version =` (the package one), never dependency versions
-$rx = [regex]::new('(?m)^(version\s*=\s*")[^"]+(")')
-Write-Text 'Cargo.toml' ($rx.Replace($toml, "`${1}$new`${2}", 1))
-Write-Host "  $(if ($DryRun) { 'would update' } else { 'updated' }) Cargo.toml"
-
-# Cargo.lock: only the mavyex package entry
-if (Test-Path 'Cargo.lock') {
-    $cl = Read-Text 'Cargo.lock'
-    $rx = [regex]::new('(name = "mavyex"\r?\nversion = ")[^"]+(")')
-    if ($rx.IsMatch($cl)) {
-        Write-Text 'Cargo.lock' ($rx.Replace($cl, "`${1}$new`${2}", 1))
-        Write-Host "  $(if ($DryRun) { 'would update' } else { 'updated' }) Cargo.lock"
-    }
+if (-not $DryRun) {
+    $text = $text.Replace("<Version>$current</Version>", "<Version>$new</Version>")
+    [System.IO.File]::WriteAllText($project, $text, (New-Object System.Text.UTF8Encoding($false)))
 }
-
+Write-Host "  $(if ($DryRun) { 'would update' } else { 'updated' }) src\Mavyex\Mavyex.csproj"
 Write-Host "Done. Next: .\release.ps1" -ForegroundColor Green
