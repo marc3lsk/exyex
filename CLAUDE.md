@@ -1,96 +1,71 @@
 # mavyex – notes for agents
 
-Native Rust (egui/eframe 0.37, Rust 2024) dual-pane file manager for **Windows** – a "next-gen" mix of Explorer and
-Total Commander. No web UI. User-facing docs (keys, search, install) are in `README.md`; this file is what you need
-to change the code safely. The user writes Slovak; answer in Slovak, keep code/comments in English.
+C# / WPF on **.NET 10** dual-pane file manager for **Windows** – a "next-gen" mix of Explorer and Total Commander.
+Branch `dotnet10` is the 1:1 port of the Rust/egui version (branch `main`, versions ≤ 0.1.x). User-facing docs (keys,
+search, install) are in `README.md`. The user writes Slovak; answer in Slovak, keep code/comments in English.
 
 ## Commands
-- `cargo build` / `cargo test` (~28 tests: ops, search, deep, archive, editor, textdiff). `.\dev.ps1` (-Release, -Watch), `.\bump-version.ps1`,
-  `.\release.ps1 -Bundle exe|setup|zip|all` (outputs to `release\`, git-ignored).
-- **Kill the running app before building** (`taskkill /F /IM mavyex.exe`), otherwise the exe is locked.
+- `dotnet build mavyex.slnx`, `dotnet test mavyex.slnx` (~150 xUnit tests in `tests/Mavyex.Tests`: VPath, store,
+  ops, archive, search/deep, sftp (pure parts), editor, preview, text diff).
+- `.\dev.ps1` (-Watch, -DataDir), `.\bump-version.ps1` (`<Version>` in the csproj), `.\release.ps1 -Bundle exe|setup|zip|all
+  [-SelfContained]` (single-file publish → `release\`, git-ignored).
+- `nuget.config` clears machine package sources (a company feed in the global config is often unreachable).
+- A running `mavyex.exe` from `src\Mavyex\bin` locks the build output – stop it first. Never kill the user's
+  installed mavyex without asking.
+- `MAVYEX_HOME=<dir>`: other settings folder **and** its own single-instance mutex/pipe → test instances run next to
+  the real one. `MAVYEX_SOFTWARE_RENDER=1`: software rendering so PrintWindow screenshots show WPF content.
 
-## Source map (`src/`)
+## Source map (`src/Mavyex/`)
 | File | Role |
 |---|---|
-| `main.rs` | entry: `--install/--uninstall`, `*_setup.exe` wizard, single-instance check, eframe options |
-| `app.rs` (largest) | `App` state, all UI (`ui_pane`, dialogs, palette, jobs window), `Ev` event queue, `run(Action)`, themes |
-| `model.rs` | `Entry`, `Tab` (entries/view/cursor/selection/history/sort/filter), `rebuild_view`, path helpers |
-| `search.rs` | in-folder search: `SearchMode` (Smart/Fuzzy/Wildcard/Regex), `compile -> Matcher` (score/ranges), `glob_match` |
-| `archive.rs` | zip/jar, tar, tar.gz/tgz, gz as folders (`Kind` by name; tar/gz listings via one stream pass, cached in `INDEX` by mtime/size; plain `.gz` = one file named after the archive): virtual paths (zip file path + inner path) (`split`, `list`, `extract`); hooked into `model::read_dir` and `ops`. Editable through *edit sessions* (staging folder, see Architecture) |
-| `editor.rs` | F4 external editor: command templates (`{file}` `{dir}` `{line}`), per-extension rules, `launch` (resolves `.cmd`/`.exe` on PATH) |
-| `textdiff.rs` | Ctrl+Shift+D side-by-side text diff in its own OS window (`similar` crate), own dark/light theme |
-| `sftp.rs` | SFTP via `russh` + `russh-sftp` (pure Rust, `ring`; blocking API over a private tokio runtime) + Pageant agent auth; virtual paths `sftp:\user@host[:port]\~\dir`; connection pool, TOFU host keys, list/transfer/remove |
-| `thumbs.rs` | async image thumbnails for the grid view (texture cache) |
-| `preview.rs` | Quick Look panel (F3): background loader + UI |
-| `props.rs` | Windows Properties dialog (`SHObjectProperties` for one item, `SHMultiFileProperties` for several); local paths only |
-| `deep.rs` | "Subfolders" search: background BFS walker streaming `DeepMsg::Batch` |
-| `actions.rs` | `Action` enum, `bindings()` key table, palette list, names |
-| `ops.rs` | copy/move/trash/delete as background jobs (mpsc + cancel flag, progress, conflict naming) |
-| `store.rs` | persisted state `%APPDATA%\mavyex\state.json` (favorites, frecency visits, session, theme, search opts, exclude) |
-| `single.rs` | single instance: named mutex + pipe `\\.\pipe\mavyex-<USER>`; `mavyex <path>` opens a tab in the running app |
-| `install.rs` | per-user self-installer (HKCU Path, Apps & features, Start menu). **Never run on the user's machine / untested** |
-| `icons.rs`, `icon_draw.rs`, `build.rs` | shell icons per extension; generated app icon (also embedded in exe via build.rs) |
+| `Program.cs` | `Main`: `--install/--uninstall`, `*_setup.exe` wizard, single instance, crash.log, `Application` (no App.xaml) |
+| `Core/VPath.cs` | **Rust `Path` semantics on string paths** (Parent/FileName/StartsWith/StripPrefix/Join/LexicalNormalize, ParseUserPath). Use it for all virtual paths |
+| `Core/Entry.cs`, `Fs.cs` | listing row; `Fs.ReadDir` dispatches local / archive / SFTP (model.rs read_dir), `WithUp`, `IsDirPath`, `DirMtime` |
+| `Core/Tab.cs` | model.rs Tab: entries/view/cursor/selection(by path)/history/sort/filter/deep search/async navigation (120 ms, then `PollLoad`) |
+| `Core/Store.cs` | `state.json` (snake_case, Rust-compatible) + SearchOpts/SortKey/ViewMode/Cols/WinGeom |
+| `Core/Actions.cs`, `Text.cs` | `Act` enum, palette list, names, `Bindings` (most specific modifiers first), shortcut labels; natural sort, sizes, palette fuzzy |
+| `Core/TextDiff.cs` | non-UI diff engine for the compare window (DiffPlex) |
+| `Services/Archive.cs` | zip/jar, tar, tar.gz/tgz, gz as folders; listing cache; edit sessions (staging folder, `Save`/`Discard`) |
+| `Services/Sftp.cs` | SSH.NET + SshNet.Agent (Pageant only); pool, TOFU `known_hosts.json` (Rust format), aliases, transfers, chown |
+| `Services/Ops.cs`, `RecycleBin.cs` | background copy/move/trash/delete/zip jobs (`Job` polled by the UI, `Completed` event), conflict policies |
+| `Services/Search.cs`, `Deep.cs` | Smart/Fuzzy/Wildcard/Regex + `:size :age :date :type :ext` filters; subfolder / content walker (`Drain`, callback) |
+| `Services/Editor.cs`, `Props.cs` | F4 command templates + per-extension rules; Windows Properties dialog |
+| `Native/SingleInstance.cs`, `Installer.cs` | mutex + CurrentUserOnly named pipe; per-user installer (PATH, Apps & features, Start menu). **Installer never run on the user's machine** |
+| `UI/MainWindow*.cs` | app.rs App: state + `Render()`; `.Actions` (Run), `.Events` (keys, mouse, menus, path bar, drag & drop), `.Overlays` (palette, dialogs) |
+| `UI/PaneView.cs` | one pane: tab strip, drives, nav + path bar/suggestions, search bar, header, virtualized list, footer |
+| `UI/FileRows.cs` | custom-drawn `FileRow` / `GridRow` (OnRender like egui), `RowContext`, `RowPaint.Columns` |
+| `UI/Widgets.cs` | `Paint` colours/icons, `IconBtn`, `Chip`, `TabPill` |
+| `UI/PreviewPanel.cs`, `PreviewLoader.cs`, `Thumbs.cs`, `ShellIcons.cs`, `ImageDecode.cs` | Quick Look, grid thumbnails, shell icons |
+| `UI/TextDiffWindow.cs`, `JobsWindow.cs` | text compare window; operations window |
+| `UI/Theme.cs`, `Styles.xaml` | light/dark DynamicResources (PanelBg Fg WeakFg Accent RowSel …), dark title bar |
 
 ## Architecture rules
-- **Immediate mode + event queue:** while drawing, UI code pushes `Ev` values; they are applied after drawing
-  (`App::apply`). Do not mutate panes/tabs structurally mid-draw. Keyboard goes through `Action` + `bindings()`
-  (most specific modifier combos first – the first match consumes the key).
-- **Tab view:** `entries` = raw folder content (+ virtual `..` row, `is_up`); `view` = indices after filter/sort.
-  Always call `rebuild_view` after changing `filter`, `search`, `sort`, `entries`. Selection is by path.
-- **Search:** `Tab.search` (`SearchOpts`: mode, match_case, deep) + `Tab.filter` + `Tab.matcher`. Options are stored in
-  `Store` and copied into every tab (`Ev::SetSearch`, new tabs inherit). Search-box keys are consumed only while it
-  has focus. `..` is hidden while searching.
-- **Subfolder search:** `rebuild_view -> sync_deep` compares a key (filter/opts/exclude/hidden) and (re)starts the
-  walker; dropping `DeepJob` cancels it. Results are appended to `entries` with `deep = true` and
-  `name` = relative path; `rebuild_view` shows only deep entries while deep search is active. `poll_deep` runs each
-  tick. `reload()` re-attaches `deep_res`. Exclude list is manual (`Store.exclude`, comma separated globs) –
-  nothing is excluded automatically (user decision). Deep results can be renamed inline (`Tab::note_rename` keeps the renamed item in `Tab.kept` so it stays listed until the query/folder changes); `Alt+Enter`
-  (`ShowInFolder`) goes to the containing folder with the cursor on the item.
-- **Background work:** file ops (`ops.rs`) and the deep walker run on threads and report via channels; the UI polls.
-  Directory reads on the UI thread are still synchronous (slow network/huge dirs can freeze – known, unfixed).
-- **FS watcher:** `notify` watches visible folders; events are debounced (200 ms calm / 1 s max); polling fallback
-  for unwatched dirs.
-- **Async navigation:** `Tab::go/go_back/go_forward` read the folder on a thread and wait 120 ms; slow folders
-  set `Tab.loading` and finish in `poll_load` (called from `App::tick`). Visits are recorded only on arrival.
-- **Archives:** a path is virtual when an ancestor is an existing `.zip/.jar` file (`archive::split`; `in_archive` is also true
-  for the zip file itself – use `split_inner` when you mean "something inside"). Writes are allowed: the first write
-  (`archive::real_for_write` / `real_for_edit`, called from `ops::run`, `do_rename`, `do_create`, F4) extracts the whole zip into
-  a staging folder (an *edit session*, `SESSIONS`); while a session exists `list/read_head/size/extract/extract_temp` read the
-  staging folder, and `ops` maps archive sources/dest to staging paths. `App::check_archives` (each tick) asks
-  `Dialog::ArchiveUpdate` once no tab is inside the zip any more (`archive::save` rewrites the zip atomically, `discard` drops
-  the copy); quit / window close ask first (`request_quit`). Extraction into staging is synchronous on the UI thread when it
-  starts from rename/create/F4 (big zips freeze briefly).
-- **F4 / editor:** `Action::EditFile` (F4; on a folder it falls back to `EditPath`). `Store.editor` + `Store.editor_rules`
-  (`Dialog::Editor`). Remote files: `edit_file` downloads via `sftp::fetch_temp`, `App.remote_edits` polls the local mtime
-  (700 ms quiet period) and uploads with `sftp::upload` on a thread. Upload path was not run against a real server yet.
-- **Search filters:** `search::compile` strips `:size/:age/:date/:type/:ext` tokens into `Matcher.filters`
-  (`filters_ok(&Entry)`); the rest is the name query. `rebuild_view` and the deep walker apply both.
-- **Content search:** `SearchOpts.content` (implies deep). `deep.rs` feeds files to 4 scanner threads; results carry
-  `Entry.snippet`; `rebuild_view` accepts deep entries without re-matching their names in content mode.
-- **Views:** `Store.view` (`ViewMode`) and `Store.cols`; `Tab.row_h` / `Tab.grid_cols` are set by `ui_pane` each frame
-  and used by `ensure_visible` and keyboard paging. `item_interact` is shared by rows and grid cells.
-- **SFTP aliases:** `Store.aliases` (`user@host:port` → name) is mirrored into `sftp::ALIASES` (`set_aliases`); resolved in
-  `sftp::from_url`, shown via `sftp::title/pretty`. `App::set_alias` saves immediately.
-- **SFTP:** a path is remote when `sftp::is_remote` (prefix `sftp:`). `model::read_dir` dispatches to `sftp::list`
-  (so async loading, search, preview all work); `ops` handles download/upload/remote delete; `App` branches for rename,
-  create, open (temp download), delete (always permanent). Never touch the network from per-keystroke UI code (the
-  path-bar suggestions skip remote dirs). Live-verified (read-only) against OpenSSH 10.2: handshake, Pageant auth, listing, download. Upload/delete/rename were not run on a real server. Do NOT switch back to `ssh2`/libssh2-WinCNG: it lacks curve25519/ecdh and fails key exchange with modern OpenSSH (`Session(-5)`).
-- **Compare:** `App.compare` + `diff` (name → `Diff`) recomputed each tick; rows draw a colored stripe.
-- **Window geometry** is saved in `Store.window` / `jobs_win` (`WinGeom`, validated against the virtual screen).
-- **Operations window** is a separate OS window (`show_viewport_immediate`), not an in-app panel.
-- Confirm dialogs (delete, F5/F6 transfer) focus the OK button; Enter on a focused button is left to egui.
+- **State → view:** events mutate state (Panes/Tabs/Store/dialog/palette), then call `Render()`; PaneView updates its
+  persistent elements and only rebuilds the list's ItemsSource when `Tab.View` changed (new list instance after
+  `RebuildView`). Always call `Tab.RebuildView` after changing Filter / Search / Sort / Entries. Selection is by path.
+- Rows are drawn by `FileRow`/`GridRow` from `RowContext`; realized rows are tracked in `PaneView.Realized` and
+  invalidated on render. Mouse handling is on the ListBox (Preview events → `HitRow`).
+- Keyboard: `MainWindow.OnPreviewKey` → palette / dialog / text boxes first (their own PreviewKeyDown handlers), then
+  `Actions.Bindings`, Ctrl+1..9, cursor keys, Esc; type-ahead via PreviewTextInput.
+- `Tick()` (120 ms DispatcherTimer): drives, jobs, archive "save changes?" check, remote edit uploads, FileSystemWatcher
+  events (debounced 200 ms / 1 s), compare marks, pending navigations, deep results, mtime polling for unwatched
+  folders, window geometry, debounced state save (1 s).
+- Palette and dialogs are in-window overlays; the operations window and text diff are separate Windows.
+- Drag & drop is real OLE drag: custom `mavyex-paths` format (+ FileDrop for local files, so dropping into Explorer
+  works). Internal: Shift = move, Ctrl = copy, else move within a volume; from Explorer: copy. Tabs: `mavyex-tab`.
+- Archives / SFTP / ops / search behave exactly like the Rust modules (see their file headers for deviations).
 
 ## Gotchas / workflow
-- Bash tool: heredocs with quotes or backslashes break or get mangled. For non-trivial edits write a script file
-  with the Write tool and run `python -I script.py`, or use Edit. A hook runs rustfmt after edits.
-- egui 0.37: `TextEdit::show(ui).response` is a `WidgetAtomResponse` – use `(*out.response).clone()` for an owned
-  `Response`. Use `use eframe::egui` in modules. `Id::new` is deprecated (warnings are expected, harmless).
-- Live testing: take window screenshots with PrintWindow of the mavyex process only (never full-desktop – it can
-  capture the user's other windows). Back up and restore `%APPDATA%\mavyex\state.json` around tests. If you add temporary
-  demo/env hooks, remove them afterwards (grep for `DEMO`).
-- Tested live so far: single-instance forwarding, fs watcher, operations window, search modes rendering. Only compiled
-  (not exercised): installer, tab drag/drop, slow-click rename, context menus, Right-arrow path autocomplete,
-  subfolder search UI, Alt+Enter.
+- WPF + `InvariantGlobalization` crashes – never enable it. `Path` is aliased to System.IO.Path (GlobalUsings.cs);
+  use `System.Windows.Shapes.Path` explicitly for shapes.
+- Bash tool heredocs mangle backslashes: use the Edit/Write tools or a script file.
+- Live testing: test instance with `MAVYEX_HOME=<scratch>` + `MAVYEX_SOFTWARE_RENDER=1`, screenshot only that process's
+  window with PrintWindow (popups like the path suggestions are separate windows and don't show up). Reset its
+  state.json before each run, otherwise it opens the last folders. Temporary demo hooks must be removed (grep `DEMO`).
+- Tested live (screenshots): panes in dark theme, shell icons, search bar + highlight, compare marks, Quick Look,
+  grid view, palette, copy dialog, browsing a zip, inline rename. **Not exercised:** real keyboard/mouse input, drag &
+  drop, slow-click rename, context menus, tab dragging, SFTP against a server, jobs window with a real long copy,
+  text diff from the app, installer.
 
 ## Ideas offered but not done
 See `ROADMAP.md`. Notably: "Open in mavyex" Explorer context menu, bulk rename, workspaces.

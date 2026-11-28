@@ -1,54 +1,54 @@
 <#
 .SYNOPSIS
-  Starts mavyex in development mode.
+  Builds and starts mavyex in development mode.
 .DESCRIPTION
-  Default: debug build + run (fast compile, slower runtime).
-  -Release : optimized build + run (use when judging real-world speed of big folders).
-  -Watch   : rebuild and restart on every source change (needs cargo-watch, offered to be installed).
-  Extra arguments after -- are passed to mavyex, e.g. a folder to open.
+  Default: debug build + run.
+  -Watch   : rebuild and restart on every source change (dotnet watch).
+  -DataDir : use this data folder instead of %APPDATA%\mavyex (sets MAVYEX_HOME). A test instance with its
+             own folder runs next to the installed mavyex (separate single-instance mutex and pipe).
+  MAVYEX_SOFTWARE_RENDER=1 makes PrintWindow screenshots work (WPF hardware rendering captures black).
+  Without -DataDir every running mavyex is stopped first (one instance per user).
+  Extra arguments after -- are passed to mavyex, e.g. --background.
 .EXAMPLE
   .\dev.ps1
   .\dev.ps1 -Watch
-  .\dev.ps1 -Release -- C:\Users
+  .\dev.ps1 -DataDir $env:TEMP\qtest
 #>
 [CmdletBinding()]
 param(
-    [switch]$Release,
     [switch]$Watch,
+    [string]$DataDir,
     [Parameter(ValueFromRemainingArguments = $true)][string[]]$AppArgs
 )
 
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
 
-# rustup installs to %USERPROFILE%\.cargo\bin, which a fresh shell may not have on PATH yet
-$cargoBin = Join-Path $env:USERPROFILE '.cargo\bin'
-if ((Test-Path $cargoBin) -and ($env:Path -notlike "*$cargoBin*")) { $env:Path += ";$cargoBin" }
-
-if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
-    throw "'cargo' not found. Install Rust from https://rustup.rs (plus VS Build Tools, `"Desktop development with C++`")."
+if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) {
+    throw "'dotnet' not found. Install the .NET 10 SDK: winget install Microsoft.DotNet.SDK.10"
 }
 
-# a running instance locks target\...\mavyex.exe and breaks the rebuild
-Get-Process mavyex -ErrorAction SilentlyContinue | ForEach-Object {
-    Write-Warning "mavyex is already running (PID $($_.Id)) - stopping it."
-    Stop-Process -Id $_.Id -Force
-}
-
-$profileArgs = @(); if ($Release) { $profileArgs += '--release' }
+$project = 'src\Mavyex\Mavyex.csproj'
 $appArgs = @($AppArgs | Where-Object { $_ -ne '--' })
 
-if ($Watch) {
-    if (-not (Get-Command cargo-watch -ErrorAction SilentlyContinue)) {
-        Write-Host '> cargo install cargo-watch (one-time)' -ForegroundColor Cyan
-        cargo install cargo-watch
-        if ($LASTEXITCODE -ne 0) { throw 'cargo install cargo-watch failed' }
-    }
-    Write-Host '> cargo watch (Ctrl+C to stop)' -ForegroundColor Cyan
-    $run = ('run ' + ($profileArgs -join ' ') + $(if ($appArgs) { ' -- ' + ($appArgs -join ' ') } else { '' })).Trim()
-    cargo watch -q -c -w src -w Cargo.toml -x $run
+if ($DataDir) {
+    New-Item -ItemType Directory -Force $DataDir | Out-Null
+    $env:MAVYEX_HOME = (Resolve-Path $DataDir).Path
+    Write-Host "> data folder: $env:MAVYEX_HOME" -ForegroundColor Cyan
 } else {
-    Write-Host "> cargo run$(if ($Release) { ' --release (first build takes a few minutes)' })" -ForegroundColor Cyan
-    if ($appArgs) { cargo run @profileArgs -- @appArgs } else { cargo run @profileArgs }
+    Remove-Item Env:MAVYEX_HOME -ErrorAction SilentlyContinue
+    # one instance per user: a second start would only show the running one
+    Get-Process mavyex -ErrorAction SilentlyContinue | ForEach-Object {
+        Write-Warning "mavyex is already running (PID $($_.Id), $($_.Path)) - stopping it."
+        Stop-Process -Id $_.Id -Force
+    }
+}
+
+if ($Watch) {
+    Write-Host '> dotnet watch (Ctrl+C to stop)' -ForegroundColor Cyan
+    dotnet watch --project $project run -- @appArgs
+} else {
+    Write-Host '> dotnet run' -ForegroundColor Cyan
+    dotnet run --project $project -- @appArgs
 }
 exit $LASTEXITCODE

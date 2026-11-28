@@ -125,20 +125,6 @@ public sealed partial class MainWindow : Window
             ticker.Start();
             Render();
             FocusList();
-            // DEMO - remove: MAVYEX_DEMO="Act;Act;filter=x;cursor=2;text=abc" runs commands for screenshots
-            if (Environment.GetEnvironmentVariable("MAVYEX_DEMO") is { Length: > 0 } demo)
-                Dispatcher.BeginInvoke(() =>
-                {
-                    foreach (var tok in demo.Split(';', StringSplitOptions.RemoveEmptyEntries))
-                    {
-                        if (tok.StartsWith("filter=")) { CurTab.FilterOpen = true; CurTab.Filter = tok[7..]; CurTab.RebuildView(); }
-                        else if (tok.StartsWith("cursor=")) CurTab.SetCursor(int.Parse(tok[7..]));
-                        else if (tok.StartsWith("text=") && Keyboard.FocusedElement is TextBox tb) tb.Text = tok[5..];
-                        else if (tok.StartsWith("palette=") && paletteBox != null) paletteBox.Text = tok[8..];
-                        else if (Enum.TryParse<Act>(tok, out var act)) Run(act);
-                        Render();
-                    }
-                }, DispatcherPriority.ApplicationIdle);
         };
     }
 
