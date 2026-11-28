@@ -116,7 +116,19 @@ public static class Helpers
         return null;
     }
 
-    public static bool SameContentPending() => content.Values.Any(v => v == null);
+    public static bool SameContentPending() => content.Values.Any(v => v == null) || ContentHash.AnyPending;
+
+    /// <summary>true = contents differ, false = identical or still being checked (not marked meanwhile),
+    /// null = can't tell (hash failed, e.g. no sha256sum on the server): the caller falls back to the date.</summary>
+    private static bool? ContentDiffers(Entry a, Entry b)
+    {
+        if (IsLocal(a.Path) && IsLocal(b.Path)) return SameContent(a, b) == false;
+        var sa = ContentHash.Get(a, out var ha);
+        var sb = ContentHash.Get(b, out var hb);
+        if (sa == ContentHash.State.Failed || sb == ContentHash.State.Failed) return null;
+        if (sa == ContentHash.State.Pending || sb == ContentHash.State.Pending) return false;
+        return ha != hb;
+    }
 
     /// <summary>How the items of a differ from the folder shown in b (by name; same items are left out).</summary>
     public static Dictionary<string, Diff> DiffMap(Tab a, Tab b)
@@ -133,9 +145,10 @@ public static class Helpers
             else
             {
                 var slack = TimeSpan.FromSeconds(2);
-                // same size but different dates: only a real difference if the bytes differ (not marked while that
-                // check still runs; remote / archive files keep the date rule)
-                bool Differs(bool newer) => e.Size == o.Size && IsLocal(e.Path) && IsLocal(o.Path) ? SameContent(e, o) == false : newer;
+                // Same size but different dates: the date alone does not count – only a real content difference does
+                // (local pair: byte compare; SFTP / archive: SHA-256, remote side computed by sha256sum on the server).
+                // Not marked while that check still runs; if a hash can't be computed, the date rule is used.
+                bool Differs(bool newer) => e.Size == o.Size ? ContentDiffers(e, o) ?? newer : newer;
                 if (e.Modified is { } x && o.Modified is { } y && x > y + slack) d = Differs(true) ? Diff.Newer : null;
                 else if (e.Modified is { } x2 && o.Modified is { } y2 && y2 > x2 + slack) d = Differs(true) ? Diff.Older : null;
                 else if (e.Size != o.Size) d = Diff.Size;

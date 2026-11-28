@@ -659,6 +659,67 @@ public static class Sftp
         return $"Owner changed to {spec}{(recursive ? " (recursively)" : "")}";
     }
 
+    /// <summary>SHA-256 (lower-case hex) of remote files of ONE server, computed on the server with `sha256sum` over the
+    /// exec connection (nothing is downloaded). Files that could not be hashed are missing from the result.
+    /// Throws when the server has no sha256sum or the connection fails.</summary>
+    public static Dictionary<string, string> Sha256Many(IReadOnlyList<string> paths)
+    {
+        var result = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (paths.Count == 0) return result;
+        var first = Parse(paths[0]) ?? throw new IOException($"{paths[0]}: invalid SFTP location");
+        RunOn(first, true, (c, _) =>
+        {
+            var items = paths.Where(p => Parse(p) is { } pl && pl.Key == first.Key)
+                             .Select(p => (Virtual: p, Remote: RemotePath(Parse(p)!, c.Home))).ToList();
+            foreach (var chunk in items.Chunk(200)) // keep the command line well below ARG_MAX
+            {
+                var text = "sha256sum -- " + string.Join(' ', chunk.Select(x => ShQuote(x.Remote)));
+                using var cmd = c.Exec().CreateCommand(text);
+                cmd.CommandTimeout = TimeSpan.FromMinutes(10);
+                cmd.Execute();
+                if (cmd.ExitStatus == 127) throw new IOException("sha256sum is not available on the server");
+                var sums = ParseSums(cmd.Result); // exit 1 = some files failed; the others are still listed
+                foreach (var x in chunk)
+                    if (sums.TryGetValue(x.Remote, out var h)) result[x.Virtual] = h;
+            }
+            return 0;
+        });
+        return result;
+    }
+
+    /// <summary>Parses `sha256sum` output: "hash  name" or "hash *name"; a leading '\' marks a name with escaped
+    /// '\\' / '\n' (GNU coreutils).</summary>
+    internal static Dictionary<string, string> ParseSums(string output)
+    {
+        var map = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var raw in output.Split('\n'))
+        {
+            var line = raw.TrimEnd('\r');
+            bool escaped = line.StartsWith('\\');
+            var s = escaped ? line[1..] : line;
+            if (s.Length < 67 || s[64] != ' ' || (s[65] != ' ' && s[65] != '*')) continue;
+            var hash = s[..64];
+            if (!hash.All(Uri.IsHexDigit)) continue;
+            var name = s[66..];
+            if (escaped)
+            {
+                var sb = new StringBuilder();
+                for (int i = 0; i < name.Length; i++)
+                {
+                    if (name[i] == '\\' && i + 1 < name.Length)
+                    {
+                        sb.Append(name[i + 1] == 'n' ? '\n' : name[i + 1]);
+                        i++;
+                    }
+                    else sb.Append(name[i]);
+                }
+                name = sb.ToString();
+            }
+            map[name] = hash.ToLowerInvariant();
+        }
+        return map;
+    }
+
     /// <summary>One item of a remote tree (parents come before their children). Link is set for symlinks that are
     /// removed as links.</summary>
     private readonly record struct Node(string Path, bool IsDir, long Size, DateTime? Mtime, ISftpFile? Link);
