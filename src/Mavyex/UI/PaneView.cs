@@ -72,6 +72,15 @@ public sealed class PaneView : Border
     private Point? pressAt;
     private int pressVi = -1;
     private bool pressDouble;
+    private bool drawnActive, drawnDark;
+
+    protected override void OnRender(DrawingContext dc)
+    {
+        base.OnRender(dc);
+        if (!drawnActive || ActualWidth < 4 || ActualHeight < 4) return;
+        var pen = new Pen(Paint.B(Paint.Dark ? Paint.Mul(Paint.Accent, 0.25) : Paint.Accent), 1);
+        dc.DrawRoundedRectangle(null, pen, new Rect(1.5, 1.5, ActualWidth - 3, ActualHeight - 3), 3, 3);
+    }
 
     public PaneView(MainWindow app, int pi)
     {
@@ -256,8 +265,17 @@ public sealed class PaneView : Border
     {
         var tab = Tab;
         bool active = app.ActivePane == Pi;
-        BorderThickness = new Thickness(active ? 1.5 : 1);
-        BorderBrush = active ? Paint.B(Paint.Accent) : Paint.B(Paint.Line);
+        // the border keeps the same thickness (a thicker one shifts the whole layout, layout rounding included);
+        // the active pane gets a second accent line drawn inside the padding in OnRender
+        BorderThickness = new Thickness(1);
+        // full accent is too loud on a dark background: toned down there
+        BorderBrush = active ? Paint.B(Paint.Dark ? Paint.Mul(Paint.Accent, 0.55) : Paint.Accent) : Paint.B(Paint.Line);
+        if (active != drawnActive || Paint.Dark != drawnDark)
+        {
+            drawnActive = active;
+            drawnDark = Paint.Dark;
+            InvalidateVisual();
+        }
         RenderTabs();
         RenderDrives();
         backBtn.IsEnabled = tab.Back.Count > 0;
