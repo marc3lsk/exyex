@@ -54,6 +54,11 @@ search, install) are in `README.md`. The user writes Slovak; answer in Slovak, k
 - Drag & drop is real OLE drag: custom `mavyex-paths` format (+ FileDrop for local files, so dropping into Explorer
   works). Internal: Shift = move, Ctrl = copy, else move within a volume; from Explorer: copy. Tabs: `mavyex-tab`.
 - Archives / SFTP / ops / search behave exactly like the Rust modules (see their file headers for deviations).
+- **Compare (Ctrl+M), deviation from Rust:** same size + different date is decided by content, not by the date –
+  local pairs byte by byte, anything involving SFTP / archives by SHA-256 (`Services/ContentHash.cs`; remote side via
+  `Sftp.Sha256Many` = one `sha256sum` per server over the exec connection, nothing downloaded). Pending checks are
+  not marked; if hashing fails (no sha256sum) the old date rule applies. Same size + same date (±2 s) = identical
+  without hashing; different size = marked (newer / older by date, else "different size").
 
 ## Gotchas / workflow
 - WPF + `InvariantGlobalization` crashes – never enable it. `Path` is aliased to System.IO.Path (GlobalUsings.cs);

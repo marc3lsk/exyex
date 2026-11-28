@@ -1,3 +1,4 @@
+using System.IO;
 using System.Text.Json;
 using Mavyex.Core;
 using Xunit;
@@ -57,6 +58,71 @@ public class VPathTests
         Assert.Equal("gz", VPath.Extension(@"C:\a.tar.gz"));
         Assert.Equal("", VPath.Extension(@"C:\.bashrc"));
         Assert.Equal("a.tar", VPath.Stem(@"C:\a.tar.gz"));
+    }
+}
+
+public class Sha256SumTests
+{
+    [Fact]
+    public void ParsesSha256sumOutput()
+    {
+        var h1 = new string('a', 64);
+        var h2 = new string('B', 64);
+        var h3 = new string('0', 64);
+        var outp = $"{h1}  /home/u/a file.txt\n{h2} */srv/bin.dat\r\n\\{h3}  /tmp/we\\\\ird\\nname\nsha256sum: /x: No such file or directory\n";
+        var m = Mavyex.Services.Sftp.ParseSums(outp);
+        Assert.Equal(h1, m["/home/u/a file.txt"]);
+        Assert.Equal(new string('b', 64), m["/srv/bin.dat"]);
+        Assert.Equal(h3, m["/tmp/we\\ird\nname"]);
+        Assert.Equal(3, m.Count);
+    }
+}
+
+public class CompareTests
+{
+    private static Dictionary<string, Mavyex.UI.Diff> Settled(Tab a, Tab b)
+    {
+        // hashes are computed in the background: poll until nothing is pending
+        for (int i = 0; i < 100; i++)
+        {
+            var m = Mavyex.UI.Helpers.DiffMap(a, b);
+            if (!Mavyex.Services.ContentHash.AnyPending) return Mavyex.UI.Helpers.DiffMap(a, b);
+            Thread.Sleep(50);
+        }
+        throw new TimeoutException("hashing did not finish");
+    }
+
+    [Fact]
+    public void SameSizeDifferentDateIsComparedByContentAgainstAnArchive()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"mavyex-cmp-{Environment.ProcessId}-{Guid.NewGuid():N}");
+        var local = Path.Combine(root, "local");
+        Directory.CreateDirectory(local);
+        try
+        {
+            var zip = Path.Combine(root, "remote.zip");
+            using (var z = System.IO.Compression.ZipFile.Open(zip, System.IO.Compression.ZipArchiveMode.Create))
+            {
+                foreach (var (name, text) in new[] { ("same.txt", "hello world"), ("changed.txt", "aaaa bbbb") })
+                {
+                    var en = z.CreateEntry(name);
+                    en.LastWriteTime = new DateTimeOffset(2020, 1, 1, 12, 0, 0, TimeSpan.Zero);
+                    using var w = new StreamWriter(en.Open());
+                    w.Write(text);
+                }
+            }
+            File.WriteAllText(Path.Combine(local, "same.txt"), "hello world");     // identical bytes, newer date
+            File.WriteAllText(Path.Combine(local, "changed.txt"), "aaaa cccc");    // same size, different bytes
+            var a = new Tab(local, false);
+            var b = new Tab(zip, false);
+            var m = Settled(a, b);
+            Assert.False(m.ContainsKey("same.txt"));                 // the date alone no longer marks it
+            Assert.Equal(Mavyex.UI.Diff.Newer, m["changed.txt"]);   // content differs: direction by date
+        }
+        finally
+        {
+            try { Directory.Delete(root, true); } catch { }
+        }
     }
 }
 
